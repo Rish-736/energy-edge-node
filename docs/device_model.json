@@ -1,0 +1,106 @@
+{
+  "_comment": [
+    "Machine-readable device model for the meter node.",
+    "",
+    "This is the semantic layer that makes a Modbus device usable rather than",
+    "merely reachable. A raw register holding 17260 means nothing; a register",
+    "described as {name: power, unit: W, type: float32} means something.",
+    "",
+    "Schneider's Power Monitoring Expert works this way: devices are modelled,",
+    "and the software builds its tags, labels and alarms from the model rather",
+    "than from hard-coded addresses. The payoff is that adding a second meter",
+    "becomes a data change, not a code change.",
+    "",
+    "The gateway reads this to label its MQTT topics and dashboard series.",
+    "Addresses are protocol (0-based) addresses, matching MODBUS_REGISTERS.md",
+    "and common/modbus/meter_regs.h."
+  ],
+
+  "model": "energy-edge-node/meter",
+  "model_version": 1,
+  "vendor_id": 17733,
+  "product_id": 1,
+  "vendor_name": "energy-edge-node",
+  "product_name": "DC Energy Meter Node",
+
+  "addressing": "protocol-0-based",
+  "float_word_order": "high_word_first",
+  "byte_order": "big_endian",
+
+  "link": {
+    "physical": "RS-485",
+    "baud": 19200,
+    "framing": "8N1",
+    "default_unit_id": 1,
+    "inter_frame_gap_us": 2006
+  },
+
+  "function_codes": {
+    "read_holding": 3,
+    "read_input": 4,
+    "write_single": 6,
+    "write_multiple": 16
+  },
+
+  "poll_block": {
+    "_comment": "One transaction fetches every measurement and status point.",
+    "function_code": 4,
+    "base": 16,
+    "count": 39
+  },
+
+  "points": [
+    { "addr": 0,  "qty": 1, "name": "vendor_id",    "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "identity" },
+    { "addr": 1,  "qty": 1, "name": "product_id",   "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "identity" },
+    { "addr": 2,  "qty": 1, "name": "fw_version",   "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "identity", "format": "major_minor" },
+    { "addr": 3,  "qty": 1, "name": "map_version",  "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "identity" },
+    { "addr": 4,  "qty": 1, "name": "capabilities", "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "identity", "bitfield": "capability_bits" },
+
+    { "addr": 16, "qty": 2, "name": "voltage",      "type": "float32", "unit": "V",  "scale": 1,     "access": "r",  "class": "measurement", "label": "Bus voltage" },
+    { "addr": 18, "qty": 2, "name": "current",      "type": "float32", "unit": "A",  "scale": 1,     "access": "r",  "class": "measurement", "label": "Current" },
+    { "addr": 20, "qty": 2, "name": "power",        "type": "float32", "unit": "W",  "scale": 1,     "access": "r",  "class": "measurement", "label": "Active power" },
+    { "addr": 22, "qty": 2, "name": "energy",       "type": "float32", "unit": "Wh", "scale": 1,     "access": "r",  "class": "measurement", "label": "Energy", "accumulating": true },
+
+    { "addr": 32, "qty": 1, "name": "voltage_x100", "type": "uint16",  "unit": "V",  "scale": 0.01,  "access": "r",  "class": "measurement", "alias_of": "voltage" },
+    { "addr": 33, "qty": 1, "name": "current_ma",   "type": "int16",   "unit": "A",  "scale": 0.001, "access": "r",  "class": "measurement", "alias_of": "current" },
+    { "addr": 34, "qty": 1, "name": "power_x10",    "type": "int16",   "unit": "W",  "scale": 0.1,   "access": "r",  "class": "measurement", "alias_of": "power" },
+    { "addr": 35, "qty": 2, "name": "energy_mwh",   "type": "uint32",  "unit": "Wh", "scale": 0.001, "access": "r",  "class": "measurement", "alias_of": "energy" },
+
+    { "addr": 48, "qty": 1, "name": "status_flags", "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "status", "bitfield": "status_bits" },
+    { "addr": 49, "qty": 1, "name": "truth_mask",   "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "status", "bitfield": "load_bits",
+      "note": "Simulator ground truth. Zero on real hardware -- recovering this from the aggregate signal is the Phase 5 NILM goal." },
+    { "addr": 50, "qty": 2, "name": "sample_seq",   "type": "uint32",  "unit": null, "scale": 1,     "access": "r",  "class": "status",
+      "note": "Monotonic. If it stops advancing between polls the meter has stopped sampling, which reading the power value alone cannot reveal." },
+    { "addr": 52, "qty": 2, "name": "uptime_s",     "type": "uint32",  "unit": "s",  "scale": 1,     "access": "r",  "class": "status" },
+    { "addr": 54, "qty": 1, "name": "overruns",     "type": "uint16",  "unit": null, "scale": 1,     "access": "r",  "class": "diagnostic" },
+
+    { "addr": 64, "qty": 1, "name": "cmd",          "type": "uint16",  "unit": null, "scale": 1,     "access": "rw", "class": "control",
+      "values": { "0": "idle", "1": "reset_energy_accumulator" } }
+  ],
+
+  "bitfields": {
+    "capability_bits": {
+      "0": "simulated",
+      "1": "float32_block",
+      "2": "scaled_block",
+      "3": "writable"
+    },
+    "status_bits": {
+      "0": "sensor_fail",
+      "1": "over_power",
+      "7": "simulated"
+    },
+    "load_bits": {
+      "0": "lights",
+      "1": "heater",
+      "2": "motor"
+    }
+  },
+
+  "exceptions": {
+    "1": "illegal_function",
+    "2": "illegal_data_address",
+    "3": "illegal_data_value",
+    "4": "device_failure"
+  }
+}

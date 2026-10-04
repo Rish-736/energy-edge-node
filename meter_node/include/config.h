@@ -26,6 +26,19 @@
 /* --- Serial ------------------------------------------------------------ */
 #define SERIAL_BAUD           115200
 
+/* --- Firmware identity (exposed over Modbus) --------------------------- */
+#define FW_VERSION            0x0100   /* major<<8 | minor -> v1.0 */
+
+/* --- Modbus-RTU slave over RS-485 -------------------------------------- */
+/* 19200 is the usual industrial default and keeps the 3.5-character frame
+ * gap at a comfortable ~2 ms. Faster is possible; it buys nothing here and
+ * makes framing fussier over long cable runs. */
+#define MODBUS_UNIT_ID        1
+#define MODBUS_BAUD           19200
+#define RS485_RX_PIN          16
+#define RS485_TX_PIN          17
+#define RS485_DE_PIN          4        /* MAX485 DE+RE tied together */
+
 /* --- Status flag bits (telemetry_sample_t.flags) ----------------------- */
 #define TLM_FLAG_OK           0x00
 #define TLM_FLAG_SENSOR_FAIL  0x01  /* INA226 read failed, values are stale   */

@@ -7,9 +7,13 @@ non-critical load** to cut peak demand and cost.
 Built entirely on a **safe low-voltage DC testbed (â‰¤24 V)** â€” deliberately not
 mains. Same protocols, same control problem, no mains risk.
 
-> **Status: Phase 0 complete.** Sensing, telemetry and logging work end to end.
-> Runs today against a built-in appliance simulator; swaps to a real INA226 by
-> changing the build environment.
+> **Status: Phase 1 complete.** Sensing, telemetry, logging and a full
+> Modbus-RTU slave/master pair all work, verified by 24 host unit tests.
+> Runs today against a built-in appliance simulator and a virtual RS-485 bus;
+> swaps to real hardware by changing the build environment.
+
+New here? Start with **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — it
+explains the whole system in plain language, no background assumed.
 
 ---
 
@@ -55,7 +59,9 @@ The meter node has four PlatformIO environments:
 | `esp32dev-sim` | ESP32   | Simulated appliances â€” **no sensor needed** (default) |
 | `esp32dev`     | ESP32   | Real INA226 over I2C |
 | `native-sim`   | PC      | Whole pipeline on the host, emits a capture to stdout |
-| `native`       | PC      | Unit tests for the ring buffer |
+| `native`       | PC      | Unit tests — ring buffer and Modbus protocol |
+
+The gateway node has one environment, `esp32dev`.
 
 The only difference between the two ESP32 builds is `-D USE_INA226_SIM`. Both
 link the identical telemetry, energy and ring-buffer code.
@@ -73,9 +79,13 @@ pio run -e native-sim -d meter_node
 # summarise and plot it
 python tools/replay.py docs/captures/sim_180s.csv
 
-# flash the ESP32 (simulated loads) and watch the stream
+# flash the meter (simulated loads) and watch the stream
 pio run -e esp32dev-sim -d meter_node -t upload
 pio device monitor -e esp32dev-sim
+
+# flash the gateway; it scans the bus and starts polling
+pio run -e esp32dev -d gateway_node -t upload
+pio device monitor -e esp32dev -d gateway_node
 ```
 
 ---
@@ -123,6 +133,69 @@ T,0,0,11.999,0.0000,0.000,0.000000,128,0
 
 ---
 
+## Modbus-RTU (Phase 1)
+
+The meter is a **Modbus-RTU slave**; the gateway is a **Modbus-RTU master**.
+Full register map: **[docs/MODBUS_REGISTERS.md](docs/MODBUS_REGISTERS.md)**.
+Machine-readable: **[docs/device_model.json](docs/device_model.json)**.
+
+| | |
+|---|---|
+| Physical layer | RS-485 half duplex, 19200 8N1 |
+| Function codes | `0x03`, `0x04` read · `0x06`, `0x10` write |
+| Poll | one FC4 transaction, 39 registers, 10 Hz |
+| Float encoding | float32, **high word first** (PowerLogic convention) |
+| Addressing | protocol (0-based) |
+
+### Tested without any RS-485 hardware
+
+The protocol code knows nothing about UARTs — you hand it a frame and a reply
+buffer. So a master and a slave can talk **through memory**, and the whole
+request/response cycle is verified on a PC: CRC, framing, float word order,
+block reads, exceptions, broadcast suppression, and the retry path.
+
+18 of the 24 unit tests cover Modbus. The ones worth knowing about:
+
+| Test | Why it exists |
+|---|---|
+| `float_word_order_is_high_word_first` | Swapped words is *the* classic Modbus bug — every float becomes a wild magnitude. Known-answer test: `1.0f` must encode as `0x3F80,0x0000`. |
+| `crc_of_frame_including_crc_is_zero` | Verifies the CRC algorithm *and* its byte order in one assertion. |
+| `bad_crc_is_silently_dropped` | A corrupt frame must get **no reply**. Answering line noise turns it into bus traffic. |
+| `broadcast_write_applies_but_is_not_answered` | Unit 0 must act without replying, or several slaves collide on a half-duplex line. |
+| `write_to_measurement_register_is_rejected` | A master must not be able to overwrite a measurement and read back its own lie. |
+| `scaled_block_clamps_garbage` | A NaN or a sensor fault must saturate, not wrap into a plausible wrong number. |
+
+### Things the firmware does that are easy to get wrong
+
+- **DE is dropped only after `flush()`.** The UART must finish shifting out the
+  last stop bit before the transceiver stops driving, or the end of every frame
+  is truncated and shows up as a CRC error at the far end.
+- **Framing is a timer, not a parser.** Modbus-RTU has no end byte; a frame ends
+  after 3.5 character times of silence (~2 ms at 19200).
+- **The input buffer is flushed before each request.** Otherwise a late reply to
+  the *previous* question gets parsed as the answer to this one — which yields
+  plausible but wrong data, the worst failure mode available.
+- **The slave answers with its own cursor on the ring**, fast-forwarding to the
+  newest sample. Registers hold present values, not history — while the logger,
+  reading the same ring, keeps every sample. Two readers, two needs, neither
+  aware of the other.
+- **`sample_seq` is published** so a master can tell "steady load" from "the
+  meter has silently stopped sampling". Reading power alone cannot distinguish
+  those two, because they look identical.
+
+### Discovery instead of hard-coding
+
+The gateway sweeps unit IDs 1–16 at startup and asks each one "who are you?".
+Whoever answers with the right vendor ID is added to the poll list. Adding a
+second meter is a DIP-switch change, not a code change — which is how real
+commissioning tools behave.
+
+It also reads the `SIMULATED` capability bit, so the gateway knows whether it
+is looking at real measurements or synthetic ones. Data that silently claims to
+be real when it is not is worse than no data.
+
+---
+
 ## Phase 0 results
 
 180 s host capture (`docs/captures/sim_180s.csv`):
@@ -161,7 +234,14 @@ Firmware footprint: RAM 9.4% (30.7 kB), Flash 23.9% (314 kB).
 - Low-voltage DC testbed only; no mains metering, and no AC concerns
   (power factor, harmonics, true RMS) are modelled.
 - Energy is integrated from the boot instant and is not persisted across resets.
-- Phase 0 readings come from the simulator unless built with `esp32dev`;
-  accuracy against a reference multimeter is still to be measured.
+- Readings come from the simulator unless built with `esp32dev`; accuracy
+  against a reference multimeter is still to be measured.
+- **The INA226 driver and the RS-485 transport are written from the datasheets
+  and have never run on real silicon.** The protocol logic above them is
+  tested; the two layers that touch hardware are not, and will need bring-up
+  when the parts arrive. See the checklist at the end of
+  [docs/MODBUS_REGISTERS.md](docs/MODBUS_REGISTERS.md).
+- Timestamps are milliseconds since boot, which is unusable for billing or
+  tariff windows. Real clock time (SNTP) arrives in Phase 2.
 
 Next after the roadmap: Modbus-TCP and BACnet, OT-security hardening.

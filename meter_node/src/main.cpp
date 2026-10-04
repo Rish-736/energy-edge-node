@@ -4,6 +4,7 @@
 #include "ring_buffer.h"
 #include "ina226_hal.h"
 #include "energy.h"
+#include "modbus_task.h"
 
 /* ---------------------------------------------------------------------------
  * meter_node -- Phase 0
@@ -110,6 +111,7 @@ void setup(void)
 
     xTaskCreatePinnedToCore(task_sampler, "sampler", 4096, NULL, 5, NULL, 1);
     xTaskCreatePinnedToCore(task_logger,  "logger",  4096, NULL, 2, NULL, 0);
+    modbus_task_start(&g_ring);
 }
 
 void loop(void)
