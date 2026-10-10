@@ -39,8 +39,3 @@
 #define RS485_TX_PIN          17
 #define RS485_DE_PIN          4        /* MAX485 DE+RE tied together */
 
-/* --- Status flag bits (telemetry_sample_t.flags) ----------------------- */
-#define TLM_FLAG_OK           0x00
-#define TLM_FLAG_SENSOR_FAIL  0x01  /* INA226 read failed, values are stale   */
-#define TLM_FLAG_OVER_POWER   0x02  /* above the demand-response threshold    */
-#define TLM_FLAG_SIMULATED    0x80  /* data came from the simulator, not iron */

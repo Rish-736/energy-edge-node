@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Energy Edge Node</title>
+
+<!--
+  Floor 3 of the architecture: "Apps, Analytics & Services".
+
+  Subscribes to the gateway over MQTT-on-websockets and charts what arrives.
+  Nothing here is load-bearing -- the gateway keeps polling and (from Phase 3)
+  keeps shedding load with this page closed. That is the whole point of putting
+  control on the edge rather than upstream.
+
+  THE THING TO WATCH: the power chart is plotted against each sample's own
+  timestamp, not its arrival time. So when the uplink drops, a gap opens --
+  and when it comes back, the gap FILLS IN as buffered readings arrive late.
+  Backfilled samples are drawn in amber. That is store-and-forward, visible.
+
+  Replay mode loads a capture from tools/ or docs/captures/ so the page can be
+  tested with no broker and no hardware.
+-->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.5/mqtt.min.js"></script>
+<style>
+  :root {
+    --bg:#f6f7f9; --panel:#ffffff; --border:#e2e5ea;
+    --ink:#11161d; --muted:#6b7480;
+    --accent:#2563eb; --power:#c0392b; --volt:#2980b9;
+    --amp:#27ae60; --energy:#8e44ad; --backfill:#e67e22;
+    --ok:#16a34a; --bad:#dc2626; --warn:#d97706;
+    --grid:#eceff3; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0e1116; --panel:#161b22; --border:#2a313b;
+      --ink:#e6edf3; --muted:#8b949e;
+      --accent:#58a6ff; --power:#f85149; --volt:#58a6ff;
+      --amp:#3fb950; --energy:#bc8cff; --backfill:#f0883e;
+      --ok:#3fb950; --bad:#f85149; --warn:#d29922;
+      --grid:#21262d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0e1116; --panel:#161b22; --border:#2a313b;
+    --ink:#e6edf3; --muted:#8b949e;
+    --accent:#58a6ff; --power:#f85149; --volt:#58a6ff;
+    --amp:#3fb950; --energy:#bc8cff; --backfill:#f0883e;
+    --ok:#3fb950; --bad:#f85149; --warn:#d29922;
+    --grid:#21262d;
+  }
+
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:16px; background:var(--bg); color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  .wrap { max-width:1180px; margin:0 auto; }
+
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:baseline;
+           justify-content:space-between; margin-bottom:4px; }
+  h1 { font-size:19px; margin:0; letter-spacing:-.01em; }
+  .sub { color:var(--muted); font-size:12.5px; }
+
+  .panel { background:var(--panel); border:1px solid var(--border);
+           border-radius:10px; padding:14px; margin-top:12px; }
+
+  /* connection bar */
+  .conn { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  input[type=text] {
+    background:var(--bg); color:var(--ink); border:1px solid var(--border);
+    border-radius:7px; padding:7px 9px; font:12.5px var(--mono); min-width:0;
+  }
+  #host { flex:1 1 240px; } #root { flex:0 1 140px; }
+  button {
+    background:var(--accent); color:#fff; border:0; border-radius:7px;
+    padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer;
+  }
+  button.ghost { background:transparent; color:var(--ink);
+                 border:1px solid var(--border); font-weight:500; }
+  button:disabled { opacity:.5; cursor:default; }
+  label.file { display:inline-block; }
+  label.file input { display:none; }
+
+  .pill { display:inline-flex; align-items:center; gap:6px; font-size:12px;
+          font-weight:600; padding:4px 10px; border-radius:999px;
+          border:1px solid var(--border); white-space:nowrap; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--muted); }
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
+  .dot.warn{background:var(--warn)}
+
+  /* tiles */
+  .tiles { display:grid; gap:10px; margin-top:12px;
+           grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); }
+  .tile { background:var(--panel); border:1px solid var(--border);
+          border-radius:10px; padding:11px 13px; }
+  .tile .k { font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+             color:var(--muted); }
+  .tile .v { font:600 23px/1.25 var(--mono); margin-top:3px;
+             font-variant-numeric:tabular-nums; }
+  .tile .u { font-size:12px; color:var(--muted); font-weight:400; }
+
+  canvas { width:100%; display:block; }
+  .chart-head { display:flex; justify-content:space-between;
+                align-items:baseline; margin-bottom:8px; }
+  .chart-title { font-weight:600; font-size:13.5px; }
+  .legend { display:flex; gap:12px; font-size:11.5px; color:var(--muted); }
+  .legend i { display:inline-block; width:10px; height:3px; border-radius:2px;
+              margin-right:4px; vertical-align:middle; }
+
+  /* health + log */
+  .cols { display:grid; gap:12px; grid-template-columns:1fr; }
+  @media (min-width:860px) { .cols { grid-template-columns:1fr 1fr; } }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td { padding:5px 0; border-bottom:1px solid var(--grid); }
+  td:last-child { text-align:right; font-family:var(--mono);
+                  font-variant-numeric:tabular-nums; }
+  tr:last-child td { border-bottom:0; }
+  #log { font:11.5px/1.65 var(--mono); max-height:190px; overflow-y:auto;
+         margin:0; white-space:pre-wrap; word-break:break-word; }
+  #log b { color:var(--warn); font-weight:600; }
+  #log s { color:var(--bad); text-decoration:none; }
+  .empty { color:var(--muted); font-size:12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Energy Edge Node</h1>
+      <div class="sub">Floor 3 &mdash; live telemetry from the edge gateway</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="pill"><span class="dot" id="d-gw"></span><span id="s-gw">gateway unknown</span></span>
+      <span class="pill"><span class="dot" id="d-mq"></span><span id="s-mq">disconnected</span></span>
+      <button class="ghost" id="theme" title="Toggle theme">&#9680;</button>
+    </div>
+  </header>
+
+  <div class="panel">
+    <div class="conn">
+      <input type="text" id="host"  value="ws://localhost:9001" spellcheck="false"
+             aria-label="Broker websocket URL">
+      <input type="text" id="root"  value="een/bench" spellcheck="false"
+             aria-label="Topic root">
+      <button id="connect">Connect</button>
+      <label class="file"><button class="ghost" type="button"
+             onclick="this.parentNode.querySelector('input').click()">Replay a capture</button>
+        <input type="file" accept=".csv,.txt" id="file"></label>
+      <button class="ghost" id="clear">Clear</button>
+    </div>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><div class="k">Power</div><div class="v" id="t-p">&mdash;<span class="u"> W</span></div></div>
+    <div class="tile"><div class="k">Voltage</div><div class="v" id="t-v">&mdash;<span class="u"> V</span></div></div>
+    <div class="tile"><div class="k">Current</div><div class="v" id="t-i">&mdash;<span class="u"> A</span></div></div>
+    <div class="tile"><div class="k">Energy</div><div class="v" id="t-wh">&mdash;<span class="u"> Wh</span></div></div>
+    <div class="tile"><div class="k">Cost</div><div class="v" id="t-cost">&mdash;<span class="u"> &#8377;</span></div></div>
+    <div class="tile"><div class="k">CO&#8322;</div><div class="v" id="t-co2">&mdash;<span class="u"> g</span></div></div>
+  </div>
+
+  <div class="panel">
+    <div class="chart-head">
+      <span class="chart-title">Power</span>
+      <span class="legend">
+        <span><i style="background:var(--power)"></i>live</span>
+        <span><i style="background:var(--backfill)"></i>backfilled after outage</span>
+      </span>
+    </div>
+    <canvas id="c-p" height="210"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="chart-head">
+      <span class="chart-title">Bus voltage &amp; current</span>
+      <span class="legend">
+        <span><i style="background:var(--volt)"></i>volts</span>
+        <span><i style="background:var(--amp)"></i>amps</span>
+      </span>
+    </div>
+    <canvas id="c-vi" height="130"></canvas>
+  </div>
+
+  <div class="cols">
+    <div class="panel">
+      <div class="chart-title" style="margin-bottom:8px">Link health</div>
+      <table><tbody id="health">
+        <tr><td colspan="2" class="empty">Waiting for gateway stats&hellip;</td></tr>
+      </tbody></table>
+    </div>
+    <div class="panel">
+      <div class="chart-title" style="margin-bottom:8px">Events</div>
+      <pre id="log"><span class="empty">Nothing yet.</span></pre>
+    </div>
+  </div>
+
+  <p class="sub" style="margin:14px 2px">
+    Plotted against each sample's own timestamp, so buffered readings fill the
+    gap retroactively when the uplink returns.
+  </p>
+</div>
+
+<script>
+"use strict";
+
+const MAX_POINTS  = 2400;   // 4 minutes at 10 Hz
+const WINDOW_MS   = 120000; // visible span
+
+const state = {
+  samples: [],     // {t,p,v,i,wh,cost,co2,bf}
+  stats: null,
+  meters: {},
+  gatewayOnline: null,
+  client: null,
+  replayTimer: null,
+};
+
+/* ---------- small helpers ---------- */
+const $ = id => document.getElementById(id);
+const fmt = (x, d=2) => (x === undefined || x === null || !isFinite(x))
+  ? "—" : x.toFixed(d);
+
+function logLine(msg, kind) {
+  const el = $("log");
+  if (el.querySelector(".empty")) el.textContent = "";
+  const t = new Date().toLocaleTimeString();
+  const tag = kind === "warn" ? "b" : kind === "bad" ? "s" : "span";
+  el.insertAdjacentHTML("afterbegin",
+    `<${tag}>${t}  ${msg}</${tag}>\n`);
+  while (el.childNodes.length > 200) el.removeChild(el.lastChild);
+}
+
+function setPill(dotId, textId, cls, text) {
+  $(dotId).className = "dot " + (cls || "");
+  $(textId).textContent = text;
+}
+
+/* ---------- data ---------- */
+function addSample(s) {
+  const a = state.samples;
+  // Normally monotonic; splice defensively so an out-of-order arrival cannot
+  // scramble the chart.
+  if (a.length && s.t < a[a.length - 1].t) {
+    let lo = 0, hi = a.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; (a[m].t < s.t) ? lo = m+1 : hi = m; }
+    a.splice(lo, 0, s);
+  } else {
+    a.push(s);
+  }
+  if (a.length > MAX_POINTS) a.splice(0, a.length - MAX_POINTS);
+}
+
+function updateTiles() {
+  const a = state.samples;
+  if (!a.length) return;
+  const s = a[a.length - 1];
+  $("t-p").innerHTML    = fmt(s.p, 2)  + '<span class="u"> W</span>';
+  $("t-v").innerHTML    = fmt(s.v, 2)  + '<span class="u"> V</span>';
+  $("t-i").innerHTML    = fmt(s.i, 3)  + '<span class="u"> A</span>';
+  $("t-wh").innerHTML   = fmt(s.wh, 4) + '<span class="u"> Wh</span>';
+  $("t-cost").innerHTML = fmt(s.cost, 4) + '<span class="u"> ₹</span>';
+  $("t-co2").innerHTML  = fmt(s.co2, 2)  + '<span class="u"> g</span>';
+}
+
+function updateHealth() {
+  const st = state.stats;
+  const tb = $("health");
+  if (!st) return;
+
+  const meterRows = Object.values(state.meters).map(m =>
+    `<tr><td>meter ${m.unit}</td><td>${m.online ? "online" : "offline"}${
+      m.simulated ? " &middot; simulated" : ""}${
+      m.fw ? " &middot; fw " + m.fw : ""}</td></tr>`).join("");
+
+  tb.innerHTML = meterRows + `
+    <tr><td>Samples published</td><td>${st.published ?? "—"}</td></tr>
+    <tr><td>Buffered now</td><td>${st.backlog ?? "—"}</td></tr>
+    <tr><td>Peak buffered</td><td>${st.peak_backlog ?? "—"}</td></tr>
+    <tr><td>Dropped (buffer overflow)</td><td>${st.dropped ?? "—"}</td></tr>
+    <tr><td>Uplink outages</td><td>${st.outages ?? "—"}</td></tr>
+    <tr><td>WiFi RSSI</td><td>${st.rssi ? st.rssi + " dBm" : "—"}</td></tr>
+    <tr><td>Free heap</td><td>${st.heap ? (st.heap/1024).toFixed(1) + " kB" : "—"}</td></tr>
+    <tr><td>Clock synced</td><td>${st.clock ? "yes" : "no"}</td></tr>`;
+}
+
+/* ---------- charts ---------- */
+function prepCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight || +cv.getAttribute("height");
+  if (cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)) {
+    cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+  return {g, w, h};
+}
+
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function visible() {
+  const a = state.samples;
+  if (!a.length) return [];
+  const tEnd = a[a.length-1].t;
+  const tStart = tEnd - WINDOW_MS;
+  let i = a.length - 1;
+  while (i > 0 && a[i-1].t >= tStart) i--;
+  return a.slice(i);
+}
+
+function axes(g, w, h, pad, lo, hi, unit) {
+  g.strokeStyle = css("--grid"); g.lineWidth = 1;
+  g.fillStyle = css("--muted");
+  g.font = "10px " + css("--mono");
+  g.textAlign = "right"; g.textBaseline = "middle";
+  for (let k = 0; k <= 4; k++) {
+    const y = pad.t + (h - pad.t - pad.b) * k / 4;
+    g.beginPath(); g.moveTo(pad.l, y); g.lineTo(w - pad.r, y); g.stroke();
+    const val = hi - (hi - lo) * k / 4;
+    g.fillText(val.toFixed(val >= 100 ? 0 : 1) + unit, pad.l - 6, y);
+  }
+}
+
+function drawPower() {
+  const cv = $("c-p"); const {g, w, h} = prepCanvas(cv);
+  const pts = visible();
+  if (pts.length < 2) return;
+
+  const pad = {l:46, r:10, t:8, b:18};
+  let hi = Math.max(...pts.map(p => p.p)), lo = 0;
+  hi = hi <= 0 ? 1 : hi * 1.12;
+
+  const t0 = pts[0].t, t1 = pts[pts.length-1].t || t0 + 1;
+  const X = t => pad.l + (w - pad.l - pad.r) * (t - t0) / Math.max(1, t1 - t0);
+  const Y = v => pad.t + (h - pad.t - pad.b) * (1 - (v - lo) / (hi - lo));
+
+  axes(g, w, h, pad, lo, hi, " W");
+
+  // Shade the stretches that arrived late, so the recovered gap is obvious.
+  g.fillStyle = css("--backfill") + "22";
+  let run = null;
+  for (const p of pts) {
+    if (p.bf && run === null) run = p.t;
+    else if (!p.bf && run !== null) {
+      g.fillRect(X(run), pad.t, Math.max(1, X(p.t)-X(run)), h-pad.t-pad.b);
+      run = null;
+    }
+  }
+  if (run !== null)
+    g.fillRect(X(run), pad.t, Math.max(1, X(t1)-X(run)), h-pad.t-pad.b);
+
+  // Line, recoloured per segment.
+  g.lineWidth = 1.6; g.lineJoin = "round";
+  for (let k = 1; k < pts.length; k++) {
+    const a = pts[k-1], b = pts[k];
+    g.strokeStyle = (a.bf || b.bf) ? css("--backfill") : css("--power");
+    g.beginPath(); g.moveTo(X(a.t), Y(a.p)); g.lineTo(X(b.t), Y(b.p)); g.stroke();
+  }
+
+  g.fillStyle = css("--muted"); g.textAlign = "left"; g.textBaseline = "bottom";
+  g.fillText(new Date(t0).toLocaleTimeString(), pad.l, h - 4);
+  g.textAlign = "right";
+  g.fillText(new Date(t1).toLocaleTimeString(), w - pad.r, h - 4);
+}
+
+function drawVI() {
+  const cv = $("c-vi"); const {g, w, h} = prepCanvas(cv);
+  const pts = visible();
+  if (pts.length < 2) return;
+
+  const pad = {l:46, r:42, t:8, b:14};
+  const vMax = Math.max(...pts.map(p=>p.v)) * 1.05 || 1;
+  const vMin = Math.min(...pts.map(p=>p.v)) * 0.95;
+  const iMax = Math.max(...pts.map(p=>p.i)) * 1.15 || 1;
+
+  const t0 = pts[0].t, t1 = pts[pts.length-1].t || t0+1;
+  const X = t => pad.l + (w-pad.l-pad.r) * (t-t0) / Math.max(1, t1-t0);
+  const Yv = v => pad.t + (h-pad.t-pad.b) * (1-(v-vMin)/Math.max(.001,vMax-vMin));
+  const Yi = i => pad.t + (h-pad.t-pad.b) * (1-i/iMax);
+
+  axes(g, w, h, pad, vMin, vMax, " V");
+
+  const line = (acc, Y, color) => {
+    g.strokeStyle = color; g.lineWidth = 1.4; g.beginPath();
+    pts.forEach((p,k) => k ? g.lineTo(X(p.t), Y(acc(p))) : g.moveTo(X(p.t), Y(acc(p))));
+    g.stroke();
+  };
+  line(p=>p.v, Yv, css("--volt"));
+  line(p=>p.i, Yi, css("--amp"));
+
+  g.fillStyle = css("--muted"); g.font = "10px " + css("--mono");
+  g.textAlign = "left"; g.textBaseline = "middle";
+  g.fillText(iMax.toFixed(2)+" A", w-pad.r+6, pad.t);
+  g.fillText("0 A", w-pad.r+6, h-pad.b);
+}
+
+function redraw() { drawPower(); drawVI(); updateTiles(); }
+
+/* ---------- MQTT ---------- */
+function connect() {
+  const url  = $("host").value.trim();
+  const root = $("root").value.trim().replace(/\/+$/,"");
+  if (!url) return;
+
+  disconnect();
+  setPill("d-mq","s-mq","warn","connecting…");
+  logLine(`connecting to ${url}`);
+
+  let c;
+  try {
+    c = mqtt.connect(url, { connectTimeout: 6000, reconnectPeriod: 3000,
+                            clean: true });
+  } catch (e) {
+    setPill("d-mq","s-mq","bad","connect failed");
+    logLine("connect threw: " + e.message, "bad");
+    return;
+  }
+  state.client = c;
+
+  c.on("connect", () => {
+    setPill("d-mq","s-mq","ok","connected");
+    logLine("broker connected");
+    c.subscribe(root + "/#", err => {
+      if (err) logLine("subscribe failed: " + err.message, "bad");
+      else logLine(`subscribed to ${root}/#`);
+    });
+  });
+
+  c.on("reconnect", () => setPill("d-mq","s-mq","warn","reconnecting…"));
+  c.on("close",     () => setPill("d-mq","s-mq","bad","disconnected"));
+  c.on("error", e => { logLine("mqtt error: " + e.message, "bad"); });
+
+  c.on("message", (topic, buf) => {
+    const rel = topic.slice(root.length + 1);
+    let msg = buf.toString();
+
+    if (rel === "gateway/status") {
+      const up = msg === "online";
+      if (state.gatewayOnline !== up) {
+        logLine(up ? "gateway came online"
+                   : "gateway went offline (last will)", up ? "info" : "bad");
+      }
+      state.gatewayOnline = up;
+      setPill("d-gw","s-gw", up ? "ok" : "bad",
+              up ? "gateway online" : "gateway offline");
+      return;
+    }
+
+    let j;
+    try { j = JSON.parse(msg); } catch { return; }
+
+    if (rel === "gateway/stats") {
+      const prev = state.stats;
+      state.stats = j;
+      if (prev) {
+        if (j.outages > prev.outages)
+          logLine(`uplink outage #${j.outages} recovered`, "warn");
+        if (j.dropped > prev.dropped)
+          logLine(`${j.dropped - prev.dropped} samples lost — outage `
+                + `outlasted the buffer`, "bad");
+      }
+      if (j.backlog > 0) logLine(`backfilling — ${j.backlog} buffered`, "warn");
+      updateHealth();
+      return;
+    }
+
+    let m = rel.match(/^meter\/(\d+)\/status$/);
+    if (m) {
+      const unit = +m[1];
+      state.meters[unit] = { unit, online: !!j.online, fw: j.fw,
+                             simulated: !!j.simulated };
+      logLine(`meter ${unit} announced${j.simulated ? " (simulated data)" : ""}`);
+      updateHealth();
+      return;
+    }
+
+    m = rel.match(/^meter\/(\d+)\/telemetry$/);
+    if (m) {
+      // t_unix_ms is 0 when the gateway never synced its clock; fall back to
+      // arrival time so the page still charts something useful.
+      addSample({
+        t: j.t && j.t > 1e12 ? j.t : Date.now(),
+        p: +j.p, v: +j.v, i: +j.i, wh: +j.wh,
+        cost: +j.cost, co2: +j.co2, bf: !!j.bf,
+      });
+    }
+  });
+}
+
+function disconnect() {
+  if (state.client) { try { state.client.end(true); } catch {} state.client = null; }
+  if (state.replayTimer) { clearInterval(state.replayTimer); state.replayTimer = null; }
+}
+
+/* ---------- replay (no broker needed) ---------- */
+function replay(text) {
+  disconnect();
+  state.samples = [];
+
+  const rows = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("T,")) continue;
+    const f = line.split(",");
+    if (f.length < 9) continue;
+    rows.push({ t_ms:+f[2], v:+f[3], i:+f[4], p:+f[5], wh:+f[6] });
+  }
+  if (!rows.length) {
+    logLine("no 'T,' telemetry rows found in that file", "bad");
+    return;
+  }
+
+  logLine(`replaying ${rows.length} samples from capture`);
+  setPill("d-mq","s-mq","warn","replay mode");
+  setPill("d-gw","s-gw","warn","replay (no gateway)");
+
+  const base = Date.now() - rows[rows.length-1].t_ms;
+  let k = 0;
+  state.replayTimer = setInterval(() => {
+    // 20 samples per tick = 20x real time, so a 3-minute capture plays in ~9 s.
+    for (let n = 0; n < 20 && k < rows.length; n++, k++) {
+      const r = rows[k];
+      const kwh = r.wh / 1000;
+      addSample({ t: base + r.t_ms, p:r.p, v:r.v, i:r.i, wh:r.wh,
+                  cost: kwh*8.0, co2: kwh*710.0, bf:false });
+    }
+    if (k >= rows.length) {
+      clearInterval(state.replayTimer); state.replayTimer = null;
+      logLine("replay finished");
+      setPill("d-mq","s-mq","","replay finished");
+    }
+  }, 100);
+}
+
+/* ---------- wiring ---------- */
+$("connect").onclick = connect;
+$("clear").onclick = () => {
+  state.samples = []; state.stats = null; state.meters = {};
+  $("log").innerHTML = '<span class="empty">Nothing yet.</span>';
+  $("health").innerHTML = '<tr><td colspan="2" class="empty">Waiting for gateway stats…</td></tr>';
+  redraw();
+};
+$("file").onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => replay(String(r.result));
+  r.readAsText(f);
+  e.target.value = "";
+};
+$("theme").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.setAttribute("data-theme",
+    cur ? (cur === "dark" ? "light" : "dark") : (dark ? "light" : "dark"));
+  redraw();
+};
+
+addEventListener("resize", redraw);
+setInterval(redraw, 200);
+redraw();
+</script>
+</body>
+</html>

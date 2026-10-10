@@ -1,5 +1,5 @@
 #pragma once
-#include "config.h"
+#include <stdbool.h>
 #include "telemetry.h"
 
 /* ---------------------------------------------------------------------------
@@ -24,6 +24,13 @@
  *   still present and counts the loss in `overruns`. Silent data loss is the
  *   bug that makes energy logs untrustworthy, so we surface it instead.
  * -------------------------------------------------------------------------*/
+
+/* Overridable per node via build_flags: the meter needs ~25 s of history for
+ * its consumers, while the gateway sizes this for how long an MQTT outage it
+ * should survive without losing readings. Must be a power of two. */
+#ifndef TELEMETRY_RING_SIZE
+#define TELEMETRY_RING_SIZE 256
+#endif
 
 typedef struct {
     telemetry_sample_t buf[TELEMETRY_RING_SIZE];
