@@ -1,98 +1,134 @@
 # Architecture — in plain language
 
-This document explains what this project is, how it is put together, and why it
-is built that way. It assumes no background in electronics or software.
+What this project is, how it is put together, and why it is built that way.
+It assumes no background in electronics or software.
 
 ---
 
 ## 1. What problem is this solving?
 
-Electricity costs money, and large buildings get charged twice over:
+Electricity bills for businesses have **two** separate charges:
 
-1. **For how much** energy they use (kilowatt-hours).
-2. **For their worst moment** — the single highest spike of demand in the month.
+1. **Energy charge** — how many units you used all month.
+2. **Demand charge** — based on your **single highest 15-minute burst** of power.
 
-That second charge surprises people. A factory can use modest power all month,
-switch three big machines on at the same time once, and get billed against that
-spike for the whole month.
+The second one surprises people. A business can use modest power all month,
+switch several big things on at the same moment once, and be billed against that
+one spike for the entire month.
+
+At an **electric-vehicle charging site** this gets extreme: the demand charge is
+reported to be **30–70% of the whole electricity bill**. One bad quarter-hour
+sets it.
 
 So there is real money in a device that watches power use and **automatically
-switches off whatever matters least** before a spike happens.
-
-That is what this project is: a small, safe model of such a device.
+switches off whatever can wait**, before a spike forms.
 
 ---
 
-## 2. What is physically here?
+## 2. The part that makes this honest: *what* can wait
 
-A 12 V bench supply stands in for the electricity grid. Three loads stand in for
-appliances: a resistor (a "water heater"), a small motor (a "fan"), some LEDs
-("lights").
+A lot of demand-response demos shed a home water heater. That is a bad trade and
+the field data proves it: in a trial of 191 households on grid-controlled water
+heaters, **about 40% reported cold water** and two people quit the programme.
 
-A sensor sits in the wire and measures how much power is flowing. One small
-computer reads that sensor. A second small computer asks the first for the
-numbers, publishes them to a web page, and decides when to switch something off
-through a remotely controlled switch.
+The reason it fails is simple — **the occupant never declared a deadline.** They
+might want hot water in five minutes. You have no idea. So any power you take
+away might be power they needed.
+
+An EV charger is the opposite:
+
+> A car plugged in at 7 pm and needed at 7 am wants maybe **four hours** of
+> charge inside a **twelve-hour** window.
+
+That leaves **eight hours of slack**. The driver's requirement is not "charge
+right now" — it is **"full by morning."** Move the charging around inside that
+slack and nobody notices anything at all.
+
+**That slack is the resource this whole project spends.**
+
+So the controller never asks *"whose comfort do I sacrifice?"* It asks:
+
+> *Each load needs this much energy by this time. What is the schedule that
+> meets every deadline while keeping the biggest 15-minute burst as small as
+> possible?*
+
+Service stops being a trade-off and becomes a **promise the controller is not
+allowed to break**.
+
+---
+
+## 3. What is physically here?
+
+A 12 V bench supply stands in for the grid. Three loads stand in for the site:
+
+| On the bench | What it stands for | Can it wait? |
+|---|---|---|
+| a 40 W power resistor | **an EV charger** — needs X energy by a deadline | yes, with a deadline |
+| a small 18 W motor | **a thermal load** (cooling, pumping) | yes, within limits |
+| 5 W of LEDs | **base load** — lighting, controls | **never** |
+
+A sensor in the wire measures the power. One small computer reads that sensor.
+A second small computer asks the first for the numbers, publishes them to a web
+page, and decides when to switch something off through a remote-controlled
+switch.
 
 **Nothing here runs on mains voltage.** 12 V DC is car-battery territory —
 harmless to touch. The protocols, the control problem and the engineering are
-identical to the mains version; only the danger is removed. That was a
-deliberate scoping decision, not a limitation we hit by accident.
+identical to the mains version; only the danger is removed. That was deliberate
+scoping, not an oversight.
 
 ---
 
-## 3. The three-floor design
+## 4. The three-floor design
 
-This project is deliberately laid out like Schneider Electric's **EcoStruxure**
-architecture, which organises energy systems into three layers. Think of it as
-a three-floor building.
+This is laid out like Schneider Electric's **EcoStruxure** architecture, which
+organises energy systems into three layers. Think of it as a three-floor
+building.
 
-### Floor 1 — the devices that measure ("Connected Products")
+### Floor 1 — the device that measures ("Connected Products")
 
-The sensor and the small computer attached to it. Its only job is to measure
-power accurately and keep a truthful running total of energy. It does not decide
-anything.
+The sensor and the computer attached to it. Its only job is to measure power
+accurately and keep an honest running energy total. **It decides nothing.**
 
 It publishes its readings in a standard industrial format so that *any* system
-can read them, not just ours. Schneider's equivalent products are their
-**PowerLogic** meters.
+can read them, not just ours. Schneider's equivalent is their **PowerLogic**
+meters.
 
-→ In this repo: **`meter_node/`**
+→ **`meter_node/`**
 
 ### Floor 2 — the box that collects and decides ("Edge Control")
 
-This floor asks Floor 1 for its numbers, passes them up to Floor 3, and — the
-important part — **makes the switching decisions itself**.
+Asks Floor 1 for its numbers, passes them to Floor 3, and — the important part —
+**makes the switching decisions itself**.
 
-Why does that matter? Because the internet goes down. If the decision to shed a
-load lived in the cloud, then a dropped connection would mean no control at all.
-By keeping the control logic on-site, the system keeps protecting against spikes
-even with the network completely unplugged. Schneider's equivalent product is
-the **EcoStruxure Panel Server**.
+Why does that matter? Because the internet goes down. If the decision lived in
+the cloud, a dropped connection would mean no protection at all. Keeping the
+logic on site means it keeps working with the network unplugged. Schneider's
+equivalent is the **EcoStruxure Panel Server**.
 
-→ In this repo: **`gateway_node/`**
+→ **`gateway_node/`**
 
-### Floor 3 — the screens and the analysis ("Apps, Analytics & Services")
+### Floor 3 — the screens ("Apps, Analytics & Services")
 
-Charts, running costs, CO2 figures, history. This is where a human looks. It is
-useful, but nothing here is allowed to be *required* — Floor 2 must survive
-without it. Schneider's equivalent is **Power Monitoring Expert**.
+Charts, running cost, CO2, history. Where a human looks. Useful, but nothing
+here is allowed to be *required* — Floor 2 must survive without it. Schneider's
+equivalent is **Power Monitoring Expert**.
 
-→ In this repo: **`dashboard/`**
+→ **`dashboard/`**
 
 ### Why bother with three floors?
 
-Because each floor can be replaced without touching the others. Swap the sensor
-on Floor 1 and Floors 2 and 3 never notice. Unplug Floor 3 entirely and the
-system still controls loads. That separation is the whole point of the design,
-and it is why industrial systems are built this way.
+Each floor can be replaced without touching the others. Swap the sensor and
+Floors 2 and 3 never notice. Unplug Floor 3 entirely and control continues.
+That separation is the whole point, and it is why industrial systems are built
+this way.
 
 ---
 
-## 4. How the data actually travels
+## 5. How the data actually travels
 
 ```
-  [ loads ]
+  [site loads]
       |                            FLOOR 1  -- meter_node
   [ sensor ] --> [ telemetry ring buffer ] --> [ Modbus register map ]
                         |                               |
@@ -103,109 +139,133 @@ and it is why industrial systems are built this way.
                                                         |
                         +-------------------------------+------------------+
                         |                               |                  |
-              [ shed/restore control ]        [ MQTT publish ]     [ cost / CO2 ]
+              [ deadline-aware control ]      [ MQTT publish ]     [ cost / CO2 ]
                         |                               |
                    [ relays ]                   FLOOR 3  -- dashboard
 ```
 
-Step by step, for one reading:
+One reading, step by step:
 
 1. The sensor measures volts and amps and works out watts.
 2. The meter's computer records it, adds it to the energy total, and drops it
-   into a shared memory area (the **ring buffer**, explained below).
+   into a shared memory area (the **ring buffer**, explained next).
 3. The meter copies the latest figures into **numbered pigeonholes** called
    registers, then waits. It never speaks unless asked.
 4. The gateway sends a question down the two-wire cable: *"device 1, give me
-   pigeonholes 16 to 26."* The meter answers. This question-and-answer format is
-   **Modbus-RTU**, the most widely used language in industrial equipment, and
-   the cable standard underneath it is **RS-485**.
-5. The gateway publishes the numbers over WiFi to a small message service
-   (**MQTT**), which the web page is subscribed to, so the chart updates.
-6. At the same moment the gateway checks its rules — *is power too high? is this
-   an expensive hour?* — and if needed switches off the least important load.
+   pigeonholes 16 to 54."* The meter answers. That question-and-answer format is
+   **Modbus-RTU**, the most widely used language in industrial equipment; the
+   cable standard underneath it is **RS-485**.
+5. The gateway stamps the reading with real clock time and publishes it over
+   WiFi to a small message service (**MQTT**), which the web page is subscribed
+   to, so the chart updates.
+6. The gateway's controller checks its schedule — *are we heading for a peak? Is
+   there slack left before this load's deadline?* — and if so switches it off.
 7. The load stops drawing power. The sensor sees the drop. **The loop closes.**
 
-Nobody touched anything. That is the "autonomous" part, and it is the difference
-between a monitoring project and a control project.
+Nobody touched anything. That is the difference between a *monitoring* project
+and a *control* project.
 
 ---
 
-## 5. The one design decision that shapes everything
+## 6. The one design decision that shapes everything
 
 Look again at step 2: every reading goes into a **ring buffer** — a fixed-size
-notebook that overwrites its oldest page when it runs out, like CCTV loop
-recording.
+notebook that overwrites its oldest page when full, like CCTV loop recording.
 
-Everything else in the system reads from that one notebook, and each reader
-keeps **its own bookmark**.
+Everything else reads from that one notebook, and each reader keeps **its own
+bookmark**.
 
-This matters for three reasons:
+Three reasons this matters:
 
-**Nothing can block the measurement.** The part that talks to WiFi can freeze
-for ten seconds and the sensor keeps being read on time, because the measuring
-code never waits for anybody.
+**Nothing can block the measurement.** The part that talks to WiFi can freeze for
+ten seconds and the sensor is still read on time, because the measuring code
+never waits for anybody.
 
 **Adding a feature doesn't disturb the others.** A new consumer just opens its
-own bookmark. The sampler is not modified, and the existing readers cannot tell
+own bookmark. The sampler is not modified and the existing readers cannot tell
 anyone joined.
 
-**Lost data is reported, never hidden.** If a reader falls so far behind that
-its pages get overwritten, the system counts exactly how many readings it lost
-and says so. Silently losing data is what makes an energy log untrustworthy,
-and an untrustworthy log is worthless.
+**Lost data is reported, never hidden.** If a reader falls so far behind that its
+pages get overwritten, the system counts exactly how many readings it lost and
+says so. Silently losing data is what makes an energy log untrustworthy, and an
+untrustworthy log is worth nothing.
+
+> **Why not a queue per reader?** With queues the producer must push into every
+> one. If a consumer stops reading, its queue fills, and the push either blocks
+> (the sampler stalls and misses readings) or fails (the reading is lost for
+> everyone). **With queues, a stuck consumer can stall the producer. With a ring
+> and bookmarks, a stuck consumer only hurts itself.**
 
 There is a fourth reason, and it is the long game. The final stretch goal
-(**NILM** — working out *which* appliance switched on purely from the shape of
-the total power signal) needs the fast, raw, unfiltered stream, including the
-brief spike when a motor starts. The web page only needs one reading per second,
-so it is very tempting to throw the rest away early on. Do that, and the stretch
-goal means rewriting everything.
+(**NILM** — working out *which* load switched on purely from the shape of the
+total power signal) needs the fast, raw, unfiltered stream, including the brief
+spike when a motor starts. The web page only needs one reading per second, so it
+is very tempting to throw the rest away early on. Do that, and the stretch goal
+means rewriting everything.
 
-So: keep every reading, in one place, from day one. That decision was made
-before any other code was written.
+So: keep every reading, in one place, from day one.
 
 ---
 
-## 6. What is built right now
+## 7. What is built right now
 
-**Phase 0 is complete and tested.**
+**Phases 0, 1 and 2 are complete and tested. 34 automated tests, all running on
+a PC with no hardware attached.**
+
+### Phase 0 — measuring
 
 | What | Status |
 |---|---|
-| Power measurement at 10 readings/second | working |
+| Power measured 10 times a second | working |
 | Running energy total (watt-hours) | working, time-accurate |
-| Shared ring buffer with independent readers | working, 6 tests passing |
+| Shared ring buffer with independent readers | working, 6 tests |
 | Lost-data detection and counting | working |
 | Replayable log format | proven: 1,800 readings, 0 lost |
 | Chart tool | `tools/replay.py` |
-| Appliance simulator with known correct answers | three loads |
-| Builds for real hardware | warning-free |
-| Builds and runs on a PC | no hardware needed |
 
-### The sensor has a stand-in
+**The sensor has a stand-in.** The real chip has not arrived, so there are **two
+interchangeable versions** behind one interface: the real chip, and a simulator.
+One build setting switches them. That is not a workaround — it is how testable
+embedded software is written, and it meant the whole system could be built
+before any part arrived.
 
-The real sensor chip has not arrived yet, so there are **two interchangeable
-versions** of it behind one interface: the real chip, and a simulator. One build
-setting switches between them. Nothing else in the project changes.
+**The simulator earns its keep twice.** The three loads behave like the real
+things — a clean step, a slow droop as an element warms, a motor gulping 3.5×
+its normal power for a quarter-second at startup. Those behaviours are the
+**fingerprints** the NILM stretch goal will use, and because the simulator knows
+which loads it switched on, every reading is stored with the **correct answer**
+attached. It is the training rig, not scaffolding.
 
-That is not a workaround — it is how testable embedded software is written. It
-also means the whole system can be built and verified before any part arrives.
+### Phase 1 — speaking the industrial language
 
-### The simulator earns its keep twice
+The meter answers **Modbus-RTU** over an **RS-485** cable; the gateway asks.
+39 registers fetched in a single question, ten times a second.
 
-Three simulated loads, each behaving the way the real thing does:
+The clever part: **the protocol code knows nothing about cables.** You hand it a
+message and a reply box. So a "master" and a "slave" can talk *through memory*,
+and the entire conversation — checksums, message framing, error replies — is
+tested on a PC. In the test file, the RS-485 cable is a function call.
 
-| Load | Steady power | Its distinctive behaviour |
-|---|---|---|
-| lights | 5 W | switches on cleanly, no fuss |
-| heater | 40 W | power fades ~6% as the element warms up and resists more |
-| motor | 18 W | gulps 3.5x normal power for ~1/4 second at startup, then ripples |
+The gateway also **discovers** meters rather than being told about them: at
+startup it asks every address on the bus "who are you?" and adds whoever
+answers correctly.
 
-Those behaviours are not decoration. They are exactly the **fingerprints** the
-NILM stretch goal will use to tell appliances apart. And because the simulator
-knows which loads it switched on, every reading is stored with the **correct
-answer** attached — so the classifier can be scored honestly, long before it
-ever meets a real appliance.
+### Phase 2 — surviving a dropped network
+
+The gateway publishes every reading to a message broker, and a web page charts
+it live. The feature worth demonstrating is **store-and-forward**:
+
+> Pull the WiFi. The chart stops and a gap opens. Plug it back in — **the gap
+> fills in**, retroactively, because the readings were buffered the whole time.
+
+The implementation is deliberately tiny: the publisher is just another reader of
+the ring buffer that **refuses to move its bookmark while disconnected**. When
+the link returns it catches up from where it stopped. That is how an industrial
+gateway behaves.
+
+It also states its own limit honestly: the buffer holds about 51 seconds. A
+longer outage is real data loss, and the system reports exactly how many
+readings went missing rather than papering over the gap.
 
 ### The number that matters
 
@@ -216,53 +276,67 @@ power      0.00 .. 68.17 W   (average 26.57 W)
 peak/mean  2.57x
 ```
 
-Power spikes to **2.57x the average**. That is the "before" figure. The whole
-job of the control phase is to shrink it — and because it was measured rather
-than guessed, the improvement will be a real number.
+Power spikes to **2.57× the average**. That is the "before" figure — measured,
+not guessed — so the improvement Phase 3 produces will be a real number.
 
 ---
 
-## 7. What comes next
+## 8. What comes next
 
 | Phase | What it adds | Why it matters |
 |---|---|---|
-| **1** | Modbus-RTU over RS-485; register map; device model | The industrial language. The single most employable skill here. |
-| **2** | MQTT gateway, web dashboard, **store-and-forward**, real clock time | Readings buffer during a network outage and **backfill when it returns** — the feature that separates a product from a toy. |
-| **3** | Demand-response control: **rolling demand window**, tariff schedule, alarms | Bills are based on a 15-minute average, not the instant. So the controller forecasts where the window will land and acts early — not a simple threshold. |
-| **3.5** | Modbus-TCP gateway | Industrial gateways translate between both Modbus forms. Cheap to add once Phase 1 works. |
-| **4** | TLS, access control, security notes against **IEC 62443** | The standard real energy equipment is certified against. |
-| **5** | **NILM** — identify appliances from one sensor | The differentiator. See below. |
+| **3** | **Deadline-aware controller** — rolling 15-minute demand window, each load's energy requirement and deadline, staggered restore | Bills are based on a 15-minute *average*, so the controller forecasts where the window will land and acts early. And it must meet every deadline while doing it. |
+| **3.5** | Modbus-TCP gateway | Industrial gateways translate between both forms of Modbus. Cheap once Phase 1 works. |
+| **4** | TLS, access control, notes against **IEC 62443** | The standard real energy equipment is certified against. |
+| **5** | **NILM** | Identify loads from one meter — *and* verify the controller's commands actually worked. |
 
 ### Where this goes beyond the reference architecture
 
-Two places, deliberately.
+**Deadlines instead of comfort trading.** Most demand-response systems ask "what
+can I switch off?" This one asks "what can wait, and until when?" — and then
+guarantees it does not miss. **Zero deadline misses** is a claim you can check.
 
-**Identifying appliances from a single meter.** Schneider's answer to "which
-load is running?" is **PowerTag** — a wireless sensor clipped onto *every
-individual circuit breaker*. One sensor per circuit. Phase 5 here does it with
-**one** meter and a trained classifier.
+**Verifying that a command actually worked.** This is the most interesting idea
+in the project, and it needs explaining:
 
-That is not a claim to have beaten them. Per-circuit sensing is more accurate,
-and they sell hardware, so of course that is their answer. The point is the
-trade-off: **installation cost and retrofit difficulty versus accuracy.** Fitting
-a sensor to every breaker in an existing building is expensive and disruptive,
-and that cost is the real barrier to energy monitoring getting deployed. Doing
-it in software from one meter is the cheaper, less accurate alternative. Knowing
-which trade-off you are making is the useful part.
+> A relay is **open-loop**. You command it off and get no confirmation back.
+> Contacts weld shut. Channels get miswired. Someone unplugs the load. The
+> software marks it "off" and moves on.
+>
+> So the controller believes it shed 40 W, believes the peak is handled, and
+> stops looking for more to shed. The spike happens anyway and **nothing in the
+> system ever notices.** The controller has lied to itself.
+>
+> Phase 5 fixes that using **the meter that is already there**: command the load
+> off, then check the aggregate signal. Did total power actually drop by about
+> the right amount, with the right shape? If not, raise an alarm.
 
-**Control that survives the cloud.** The shedding decision lives on the edge
-device, not in software upstream. The demonstration is simple and blunt:
-**unplug the network and watch it keep working.**
+That closes the loop using a sensor installed for a completely different reason
+— no extra wiring, no feedback contact, no sensor per circuit.
+
+**Retrofit-first.** Schneider's answer to "which load is running?" is
+**PowerTag** — a wireless sensor clipped onto *every individual breaker*. One
+sensor per circuit. This project does it with **one** meter and a classifier.
+That is not a claim to have beaten them: per-circuit sensing is more accurate,
+and they sell hardware. The point is the trade-off — **installation cost versus
+accuracy** — and installation cost is the real barrier to getting energy
+monitoring deployed at all.
 
 ---
 
-## 8. Honest limitations
+## 9. Honest limitations
 
 - Low-voltage DC only. No mains, and therefore none of AC's real difficulties:
-  power factor, harmonics, true-RMS measurement, phase imbalance.
-- The real sensor driver is written from the datasheet but has **never run on
-  actual silicon**. Expect to debug it when the part arrives.
-- Accuracy has not been checked against a reference multimeter yet.
-- The energy total starts from zero at power-on and is not saved across resets.
-- Timestamps are currently "milliseconds since switch-on", which is useless for
-  billing or tariffs. Real clock time arrives in Phase 2.
+  power factor, harmonics, true-RMS, phase imbalance.
+- The real sensor driver and the RS-485 cable layer are written from the
+  datasheets and have **never run on actual hardware**. Everything above them is
+  tested; those two layers are not.
+- The MQTT and clock-sync paths compile and their logic is unit-tested, but they
+  have **not run against a live broker**.
+- Buffer state for deferrable loads will be **modelled, not measured** — there is
+  no temperature or charge sensor on the bench. The interface is built so a real
+  one drops in.
+- Accuracy has not been checked against a reference multimeter.
+- The energy total starts at zero on power-up and is not saved across resets.
+- Cost and CO2 figures use flat assumed rates. They are assumptions, not
+  measurements.

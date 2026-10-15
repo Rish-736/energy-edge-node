@@ -6,7 +6,11 @@ which — across files.
 Read this alongside [DECISIONS.md](DECISIONS.md), which explains *why* each
 piece is shaped the way it is. This document only explains *what happens*.
 
-Last updated: Phase 2 complete (commit `e7b5815`).
+Last updated: Phase 2 complete. The reframe of 16 October 2026 (see
+[DECISIONS.md](DECISIONS.md) D82-D85) changed what the project is *for*, not how
+the existing code executes, so nothing in this document changed with it. Phase 3
+adds a controller task on the gateway, which will be documented here in the same
+commit as the code.
 
 ---
 

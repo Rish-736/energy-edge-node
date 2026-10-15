@@ -9,10 +9,11 @@ reused. A decision that gets reversed later is marked **SUPERSEDED** and kept,
 because the reasoning that led to the wrong answer is often more instructive
 than the right answer.
 
-**If you only read one section:** D11 (the ring buffer), D22 (transport-agnostic
-Modbus) and D40 (store-and-forward) are the three that shape everything else.
+**If you only read one section:** D20 (the ring buffer), D33 (transport-agnostic
+Modbus) and D50 (store-and-forward) shape everything built so far. D82-D85 are
+the reframe that decided what the project is actually *for*.
 
-Last updated: Phase 2 complete, plus D81.
+Last updated: Phase 2 complete, plus the Phase 3 reframe (D82-D85).
 
 ---
 
@@ -847,6 +848,125 @@ beside the code it configures, which is slightly less discoverable. The comment
 in `config.h` points at it.
 **Note:** both values were 256, so nothing was actually broken — this was a
 latent bug, fixed before it could bite.
+
+---
+
+## Part 9b — The Phase 3 reframe (16 October 2026)
+
+Four decisions taken together after the project's premise was challenged. Worth
+reading as a group: they are one change of direction, not four tweaks.
+
+### D82 — Target an EV charging site, not a residential building
+**The trigger:** Rishit pushed back on the project's own premise. Shedding a
+domestic water heater to shave a bill trades a person's comfort for money, and
+he was not willing to present something he did not believe in.
+
+He was right, and the field data agrees. In a published trial of 191 households
+on grid-interactive water heaters, **around 40% reported cold water draws and
+two participants withdrew over comfort.**
+
+**The diagnosis:** any domain where the deferrable load is attached to a human's
+comfort is a bad domain for this project. The trade will always look bad because
+it *is* bad.
+
+**Alternatives considered:**
+- *Residential/apartments* — rejected. The comfort trade above.
+- *Data centre thermal + batch compute* — Schneider's hottest market, and the
+  deferrable thing there (batch jobs) is genuinely free to defer. Rejected on
+  hardware fit: you cannot shed cooling, and shifting compute needs servers and
+  a job scheduler, not an ESP32 and a relay.
+- *Cold storage* — credible and ethical, large thermal mass, no comfort
+  involved. Smaller hiring market than EV infrastructure.
+- *Generic "site with demand charges"* — flexible but vague, and vague is
+  forgettable in an interview.
+
+**Chosen:** an EV charging site.
+**Why:** deferral is genuinely free — a car plugged in at 19:00 and needed at
+07:00 wants ~4 hours of charge in a 12-hour window, so there are ~8 hours of
+slack and the requirement is "full by morning", not "charge now". The economics
+are real: demand charges are reported at **30–70% of such a site's bill**, with
+facility-level load management cutting them **35–55% without reducing charging
+availability**. It fits the existing bench hardware with zero changes, and it
+widens the audience well beyond Schneider.
+**Trade-off accepted:** a narrower, more specific story. That is the point —
+specific is memorable.
+
+**Constraint that shaped this:** the resume was already sent, claiming the node
+*"auto-sheds non-critical loads to cut peak demand and cost."* Every candidate
+reframe had to keep that sentence true. This one does — it still auto-sheds
+non-critical loads to cut peak demand; it merely also guarantees the deferred
+load finishes. A reframe that contradicted the resume would have been rejected
+regardless of its merits.
+
+### D83 — Deadlines as hard constraints; peak as the objective
+**Alternatives:** the Phase 3 design as originally sketched — priority ordering
+plus a threshold, with comfort as a soft consideration.
+**Chosen:** invert it. **Never violate a deadline; minimise peak subject to
+that.**
+
+```
+Old:  if (power > limit) shed(lowest_priority)   -> "whose comfort do I spend?"
+New:  each load needs E Wh by time T;
+      schedule to meet every deadline, minimising the 15-min peak
+```
+
+**Why:** it converts service from something traded into something *guaranteed*,
+and "zero deadline misses" is a binary claim anyone can check. It also gives the
+controller actual algorithmic content — a scheduling problem — rather than a
+comparison against a constant.
+**Trade-off accepted:** more state per load (energy required, deadline, energy
+delivered so far) and a harder controller to get right. The `max_shed_duration`
+timer from the earlier sketch is retained, but renamed honestly: it is a **crude
+proxy for buffer state** used when the real state cannot be measured.
+*Honest novelty grading:* studied academically as departure-time-constrained
+charging. Absent from vendor and hobby material, which describes capacity
+splitting and load balancing. Strong framing; not a novel algorithm.
+
+### D84 — NILM as actuation verification, not just analytics
+**The observation:** a relay is an **open-loop** actuator. You command it and
+receive no confirmation. Contacts weld shut (common when switching inductive or
+high-current loads), channels get miswired, loads get unplugged, appliances with
+their own controller ignore you.
+
+The failure this produces is the dangerous kind: the controller believes it shed
+40 W, therefore believes the peak is handled, therefore stops looking for more
+to shed. The demand charge lands and **nothing in the system ever notices.** The
+controller has lied to itself.
+
+**Chosen:** Phase 5's classifier does double duty. Command a load off, then
+confirm from the **single aggregate meter** that it actually changed state —
+checking the magnitude *and* the shape of the transition, so it still works when
+several loads move at once.
+
+**Why this specifically:** the feedback loop comes free from a sensor installed
+for a completely different reason. No auxiliary contact on the relay, no current
+sensor per channel, no extra wiring — which keeps D4's retrofit-first property
+intact.
+*Honest novelty grading:* a 2025 systematic review names this exact closed loop
+as a requirement — *"after the system issues instructions… it must reliably
+verify whether the instructions were executed… forming a closed loop with the
+control module"* — and MCU-based NILM is an active research area. The review's
+own gap statement is that the components exist separately, with no full embedded
+deployment closing the loop. **That gap is where this sits. The strongest genuine
+contribution in the project.**
+
+### D85 — Publish the service cost alongside the money
+**Chosen:** report deadline misses, service violations and (Phase 5) actuation
+faults caught, next to kW and ₹.
+
+```
+peak demand reduced   __%      cost saved          __%
+deadline misses         0      service violations    0
+actuation faults caught __
+```
+
+**Why:** a demand-response result quoted without its service cost is incomplete.
+"Peak down 35%" alone is precisely the claim that produced the 40% cold-water
+statistic in D82. "Peak down 35% with zero deadline misses" is an engineering
+claim.
+**Trade-off accepted:** none worth mentioning — it is bookkeeping. The reason
+almost nobody does it is that it invites scrutiny, which is also the reason to
+do it.
 
 ---
 
