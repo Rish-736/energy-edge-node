@@ -13,7 +13,7 @@ than the right answer.
 Modbus) and D50 (store-and-forward) shape everything built so far. D82-D85 are
 the reframe that decided what the project is actually *for*.
 
-Last updated: Phase 2 complete, plus the Phase 3 reframe (D82-D85).
+Last updated: Phase 3 complete (D86-D92).
 
 ---
 
@@ -967,6 +967,99 @@ claim.
 **Trade-off accepted:** none worth mentioning — it is bookkeeping. The reason
 almost nobody does it is that it invites scrutiny, which is also the reason to
 do it.
+
+---
+
+## Part 9c — Phase 3: the controller
+
+### D86 — Bucketed energy accumulation for the demand window
+**Alternatives:** keep every sample in the window and average them; keep a
+simple running mean.
+**Chosen:** accumulate energy into 64 fixed time buckets; sum them for the
+average, zeroing buckets as they age out.
+**Why:** storing every sample at 10 Hz over a 15-minute window is ~9,000
+samples. Buckets give 1-second resolution for ~500 bytes. A running mean
+cannot forget old data, which is the one thing a *rolling* window must do.
+**Trade-off accepted:** quantisation error bounded by one bucket width —
+negligible against the forecast's own uncertainty.
+
+### D87 — A rolling window, not a fixed one
+**Why:** real tariffs mostly use fixed intervals that reset on the clock
+(:00, :15, :30). A rolling window is **stricter** — it is the worst fixed
+window that could have been drawn — so a controller that satisfies the rolling
+average satisfies any fixed one. Choosing the harder constraint means the
+result does not depend on guessing the utility's alignment.
+**Trade-off accepted:** slightly more conservative than strictly necessary.
+
+### D88 — Sort shed candidates by slack, not by a static priority
+**Alternatives:** a fixed priority list, as sketched before the reframe.
+**Chosen:** shed the load with the **most** slack; restore the one with the
+**least**. Priority only breaks ties.
+**Why:** a static list keeps shedding the same load even as that load runs out
+of time, and then needs a special case to rescue it. Sorting by slack makes
+protection fall out of the ordering: a load approaching its deadline naturally
+sinks to the bottom of the shed list and rises to the top of the restore list.
+Eligibility becomes dynamic without any extra machinery.
+**Trade-off accepted:** less predictable to a human than a fixed list. The
+decision is logged on every transition so it can be followed after the fact.
+
+### D89 — Shed one load per step, then measure
+**Alternatives:** compute the total excess and shed enough loads to cover it
+in one go.
+**Chosen:** shed a single load, then let the next measurement show the effect.
+**Why:** the excess calculation assumes nameplate ratings. Shedding to cover it
+in one step overshoots whenever a load draws less than its rating, and the
+controller then thrashes restoring what it over-shed. One at a time converges
+without oscillating, and the loop is closed by a real measurement rather than
+by arithmetic.
+**Trade-off accepted:** slower response — several control periods to shed
+several loads. At a 500 ms period against a 15-minute window, irrelevant.
+
+### D90 — A safety margin on slack, and recovery time after a forced restore
+**Both found by failing tests, and both are real.**
+
+*Slack margin.* Slack is a float difference of floats, so a load with
+"exactly zero" slack lands either side of zero depending on rounding — the
+scheduler shed it on one step and protected it on the next. Treating anything
+below `SCHED_SLACK_MARGIN_S` as critical fixes that, and is physically right
+anyway: a job should finish slightly early, not exactly on the deadline.
+
+*Recovery time.* The scheduler force-restored a load whose `max_shed_ms` had
+expired, then **re-shed it on the same step** — because nothing made it
+ineligible again. The load cycled rapidly, which defeats `max_shed_ms`
+entirely and on real hardware would destroy a compressor. A forced restore now
+sets `protect_until_ms`, so a drained buffer gets time to refill before it can
+be drained again.
+**Why this matters beyond the fix:** neither bug would have been visible from
+a demo. Both were found by tests asserting on *outcomes over time* rather than
+on single calls.
+
+### D91 — A separate site model from the sensor simulator
+**Alternatives:** extend `ina226_sim.cpp` with controllable loads.
+**Chosen:** a standalone `site_main.cpp` that models a site rather than a
+sensor.
+**Why:** `ina226_sim` models a sensor on a fixed bench workload, and its output
+*is* the calibrated Phase 0 baseline (2.57x peak-to-mean) that the docs quote.
+Changing its profile would silently invalidate that artifact. The site model
+has a different job: loads that respond to control, with jobs and deadlines.
+**Trade-off accepted:** the load signature maths (inrush, droop) exists in two
+places. Accepted because the two serve different purposes and because keeping
+Phase 0's measured baseline trustworthy is worth more than the duplication.
+
+### D92 — Report the service cost, and refuse to call it a saving
+**The observation:** the controlled run uses less total energy (3.82 → 3.37
+Wh). That looks like a bonus. It is not.
+
+The charger delivered its full job in both runs. The difference is thermal
+runtime the controller withheld — 100% down to 68.4%. A real thermal load
+claws that back afterwards (*rebound*), which this model does not simulate.
+
+**Chosen:** print thermal runtime met in both runs, and state in the output
+that the lower energy figure is **not** a saving.
+**Why:** this is D85 applied to its own first result. The temptation to quote
+"58% lower peak AND 12% less energy" is exactly how demand response earned its
+bad reputation. The honest claim is the peak reduction alone, with the service
+cost beside it.
 
 ---
 

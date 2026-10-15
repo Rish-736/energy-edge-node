@@ -209,8 +209,8 @@ So: keep every reading, in one place, from day one.
 
 ## 7. What is built right now
 
-**Phases 0, 1 and 2 are complete and tested. 34 automated tests, all running on
-a PC with no hardware attached.**
+**Phases 0 to 3 are complete and tested. 52 automated tests, all running on a
+PC with no hardware attached.**
 
 ### Phase 0 — measuring
 
@@ -266,6 +266,27 @@ gateway behaves.
 It also states its own limit honestly: the buffer holds about 51 seconds. A
 longer outage is real data loss, and the system reports exactly how many
 readings went missing rather than papering over the gap.
+
+### Phase 3 — deciding what can wait
+
+The controller defends a demand target by deferring loads into their slack. Run
+over an identical workload twice, once off and once on:
+
+```
+                     baseline   controlled
+peak demand            62.2 W      26.0 W     58% lower
+charge delivered        1.506 Wh    1.506 Wh  identical
+deadline misses             0           0
+```
+
+The car left with exactly the same charge. The controller changed *when* the
+energy was drawn, not how much the driver got.
+
+It works off a **forecast** — where the billing interval will land if nothing
+changes — rather than the present reading, because by the time the average
+crosses the limit it is too late to pull it back. And it picks which load to
+shed by **slack** (how long it can wait and still finish), so a load running
+out of time protects itself automatically.
 
 ### The number that matters
 

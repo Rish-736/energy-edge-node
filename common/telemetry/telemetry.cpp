@@ -6,9 +6,9 @@ void telemetry_truth_str(uint8_t mask, char *buf, unsigned len)
     if (!len) return;
 
     static const struct { uint8_t bit; const char *name; } k[] = {
-        { LOAD_LIGHTS, "lights" },
-        { LOAD_HEATER, "heater" },
-        { LOAD_MOTOR,  "motor"  },
+        { LOAD_BASE,    "base"    },
+        { LOAD_CHARGER, "charger" },
+        { LOAD_THERMAL, "thermal" },
     };
 
     unsigned n = 0;

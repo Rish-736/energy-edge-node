@@ -102,3 +102,42 @@
  * tariff and your grid's published factor before quoting any result. */
 #define TARIFF_INR_PER_KWH 8.0f
 #define CO2_G_PER_KWH      710.0f      /* India grid average, approximate */
+
+/* --- Demand-response controller (Phase 3) ------------------------------- */
+/* The billing interval being defended. Real tariffs use 15 minutes; 60 s is
+ * used on the bench so a demo completes while someone is watching. Change
+ * this one constant to run against a real tariff. */
+#define DEMAND_WINDOW_MS   60000u
+#define DEMAND_TARGET_W    35.0f
+
+/* How often the controller re-evaluates. Faster than this buys nothing: the
+ * demand window moves slowly, and each decision needs a measurement to show
+ * its effect before the next one is taken. */
+#define CONTROL_PERIOD_MS  500u
+
+/* Minimum gap between restores. Releasing several loads together creates a
+ * brand-new peak -- including motor inrush -- which is the classic way a naive
+ * controller makes things worse than doing nothing. */
+#define CONTROL_STAGGER_MS 10000u
+
+/* Relay outputs. Active HIGH; a relay board with inverted logic needs
+ * RELAY_ACTIVE_LOW. Pins chosen to avoid the strapping pins (0, 2, 12, 15)
+ * and the ones already used by RS-485. */
+#define RELAY_CHARGER_PIN  25
+#define RELAY_THERMAL_PIN  26
+#define RELAY_ACTIVE_LOW   0
+
+/* Nameplate ratings, used for slack arithmetic. With no per-load metering
+ * these are what the scheduler reasons about -- which is exactly the
+ * assumption Phase 5's NILM verification exists to check. */
+#define LOAD_BASE_W        5.0f
+#define LOAD_CHARGER_W     40.0f
+#define LOAD_THERMAL_W     18.0f
+
+/* Equipment protection. Violating these damages hardware, so they override
+ * the demand target. */
+#define CHARGER_MIN_ON_MS  5000u
+#define CHARGER_MIN_OFF_MS 5000u
+#define THERMAL_MIN_ON_MS  10000u
+#define THERMAL_MIN_OFF_MS 10000u
+#define THERMAL_MAX_SHED_MS 60000u

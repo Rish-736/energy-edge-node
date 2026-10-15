@@ -24,6 +24,7 @@ this repo builds **four different programs** from largely the same source:
 | **Meter firmware** | `meter_node/src/main.cpp` → `setup()` | ESP32 #1 |
 | **Gateway firmware** | `gateway_node/src/main.cpp` → `setup()` | ESP32 #2 |
 | **Host simulator** | `meter_node/src/sim_main.cpp` → `main()` | your PC |
+| **Site model** | `meter_node/src/site_main.cpp` → `main()` | your PC |
 | **Unit tests** | `meter_node/test/*/test_*.cpp` → `main()` | your PC |
 
 Which one you get depends on the PlatformIO environment you build. The
@@ -44,6 +45,8 @@ pio test -e native      -d meter_node    # unit tests
 Four shared modules are compiled into both firmwares:
 
 ```
+common/control/demand_window.*   the rolling billing average + projection
+common/control/scheduler.*       deadline-aware shed/restore decisions
 common/telemetry/telemetry.*     the sample format + status flags
 common/telemetry/ring_buffer.*   the circular buffer
 common/telemetry/forwarder.*     store-and-forward (gateway only, by use)
@@ -359,6 +362,42 @@ task_poll()
 **This task never touches the network.** That is the whole point — it keeps
 filling the ring whether or not anything can be published.
 
+### task_control — every 500 ms, priority 2, core 1
+
+**File:** `gateway_node/src/control.cpp`
+
+```
+task_control()
+ ├─ for each device: ring_reader_attach(ring, &s_reader[k], "control")
+ ├─ apply_mask(initial)                     drive the relay GPIOs
+ │
+ └─ forever:
+     ├─ w = read_site_power(...)
+     │     for each device: drain its ring to the NEWEST sample and sum
+     │     the power. Present values, not history -- so the backlog is
+     │     discarded, while the MQTT publisher reading the same rings
+     │     keeps every sample.
+     │
+     ├─ mask = sched_step(&s_sched, w, now)       common/control/scheduler.cpp
+     │   ├─ dw_update(...)                        fold w into the window
+     │   ├─ credit_energy(...)                    deferrable loads accrue Wh
+     │   ├─ check deadlines -> deadline_misses++
+     │   ├─ must_restore(...)  -> forced restores first, overriding the target
+     │   ├─ dw_excess_w(...)   -> how much must come off, given the FORECAST
+     │   │     > 0  -> shed the eligible load with the MOST slack
+     │   │     = 0  -> if there is headroom and the stagger has elapsed,
+     │   │              restore the shed load with the LEAST slack
+     │   └─ return sched_mask()
+     │
+     ├─ if (mask changed) apply_mask(mask) + log the transition
+     ├─ every 10 s: log avg / peak / sheds / restores / misses / slack
+     └─ vTaskDelayUntil(500 ms)
+```
+
+**Note what it does not do:** it never touches MQTT. It reads the ring buffer,
+so it keeps shedding and restoring with the network unplugged. That is the
+edge-autonomy claim, implemented rather than asserted.
+
 ### task_uplink — every 20 ms, priority 3, core 0
 
 ```
@@ -421,8 +460,10 @@ publish_batch(d)
 ```
    txn_read / rs485_*     ──  ONLY task_poll (after setup)   → no mutex needed
    PubSubClient / WiFi    ──  ONLY task_uplink               → no mutex needed
+   relay GPIOs            ──  ONLY task_control              → no mutex needed
    d->ring                ──  written by task_poll,
-                              read by task_uplink via the forwarder
+                              read by task_uplink (forwarder) AND
+                              task_control, each with its own cursor
                               → protected by portMUX inside ring_buffer.cpp
 ```
 
@@ -490,6 +531,38 @@ python tools/replay.py docs/captures/sim_180s.csv
 
 ---
 
+## 8b. Host site model — `native-site`
+
+**File:** `meter_node/src/site_main.cpp`
+
+Runs an identical EV-charging workload twice — once ignoring the scheduler's
+mask, once obeying it — and prints the comparison. Same loads, same profile,
+same seeded noise, so the difference is attributable to the controller alone.
+
+```
+main()
+ └─ run(control_enabled = false, &baseline, csv)
+ └─ run(control_enabled = true,  &controlled, csv)
+     └─ for t in 0 .. 600 s step 500 ms:
+         ├─ at t = 60 s: sched_set_job(charger, 1.5 Wh, deadline 480 s)
+         ├─ decide what is physically live:
+         │     plugged in AND job unfinished AND (control off OR mask allows)
+         ├─ w = site_power_w(...)          base + charger + thermal signatures
+         ├─ sched_step(&sch, w, t)         the controller sees the real reading
+         └─ accumulate peak / mean / energy / thermal runtime
+ └─ print the comparison, and exit non-zero unless
+    deadline_misses == 0 AND peak fell
+```
+
+```bash
+pio run -e native-site -d meter_node
+./meter_node/.pio/build/native-site/program            # summary
+./meter_node/.pio/build/native-site/program --csv > docs/captures/site_control.csv
+python tools/plot_site.py docs/captures/site_control.csv -o docs/captures/site_control.png
+```
+
+---
+
 ## 9. Unit tests — `native`
 
 Each test directory is a separate program with its own `main()`:
@@ -499,6 +572,7 @@ Each test directory is a separate program with its own `main()`:
 | `test/test_ring/` | 6 | `main()` → `UNITY_BEGIN` → `RUN_TEST(...)` |
 | `test/test_modbus/` | 18 | same |
 | `test/test_forwarder/` | 10 | same |
+| `test/test_control/` | 18 | same |
 
 Unity calls `setUp()` before each test and `tearDown()` after. The `native`
 environment sets `build_src_filter = -<*>` — **nothing** from `src/` is
@@ -511,6 +585,7 @@ The three suites drive their subject directly:
 test_ring       → ring_init, ring_push, ring_reader_attach, ring_read
 test_modbus     → modbus_master_build_* → modbus_slave_handle → modbus_master_parse_*
 test_forwarder  → forwarder_set_link(true/false) + ring_push, then forwarder_take
+test_control    → dw_update/dw_excess_w, then sched_step over whole scenarios
 ```
 
 `test_forwarder` is worth noting: the entire store-and-forward feature is

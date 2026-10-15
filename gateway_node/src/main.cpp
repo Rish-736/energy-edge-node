@@ -10,6 +10,7 @@
 #include "telemetry.h"
 #include "ring_buffer.h"
 #include "forwarder.h"
+#include "control.h"
 
 /* ---------------------------------------------------------------------------
  * gateway_node -- Phases 1 and 2. The "Edge Control" floor.
@@ -113,6 +114,14 @@ static uint64_t now_unix_ms(void)
 {
     if (!s_clock_ok) return 0;
     return s_epoch_base_ms + (uint64_t)(millis() - s_base_millis);
+}
+
+/* Lets the controller attach its own reader to each device's ring without
+ * either file needing the other's struct layout. */
+static telemetry_ring_t *device_ring(int index)
+{
+    if (index < 0 || index >= s_dev_count) return NULL;
+    return &s_dev[index].ring;
 }
 
 /* =========================================================================
@@ -504,6 +513,13 @@ void setup(void)
 
     xTaskCreatePinnedToCore(task_poll,   "poll",   4096, NULL, 4, NULL, 1);
     xTaskCreatePinnedToCore(task_uplink, "uplink", 8192, NULL, 3, NULL, 0);
+
+    /* Started after discovery, so it knows how many rings to read from. */
+    control_task_start(device_ring, s_dev_count);
+
+    /* A demo job so a bench run has something to schedule. On a real site
+     * this arrives from the charge point when a vehicle plugs in. */
+    control_set_charger_job(1.5f, millis() + 480000u);
 }
 
 void loop(void)

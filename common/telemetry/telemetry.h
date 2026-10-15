@@ -47,10 +47,10 @@ typedef struct {
 /* A bitmask rather than a string so a sample is self-contained and safe to
  * copy between tasks -- and because an on/off vector is exactly what a NILM
  * classifier emits, so Phase 5 compares its output against this directly. */
-#define LOAD_NONE    0x00
-#define LOAD_LIGHTS  0x01
-#define LOAD_HEATER  0x02
-#define LOAD_MOTOR   0x04
+#define LOAD_NONE     0x00
+#define LOAD_BASE     0x01   /* lighting, controls -- never shed            */
+#define LOAD_CHARGER  0x02   /* EV charger -- deferrable, has a deadline    */
+#define LOAD_THERMAL  0x04   /* cooling/pumping -- flexible within a band   */
 
-/* Render a mask as e.g. "heater+motor" into buf. Always NUL-terminates. */
+/* Render a mask as e.g. "charger+thermal" into buf. Always NUL-terminates. */
 void telemetry_truth_str(uint8_t mask, char *buf, unsigned len);

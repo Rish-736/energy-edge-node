@@ -12,10 +12,10 @@
  * Three "appliances" on a shared bus, each with a deliberately distinct
  * electrical signature:
  *
- *   LIGHTS  5 W   clean step, no transient            (LED strip)
- *   HEATER  40 W  step, then a slow droop as the element heats and its
+ *   BASE     5 W   clean step, no transient            (LED strip)
+ *   CHARGER 40 W  step, then a slow droop as the element heats and its
  *                 resistance rises                     (power resistor)
- *   MOTOR   18 W  ~3.5x inrush decaying over ~250 ms, then a steady
+ *   THERMAL 18 W  ~3.5x inrush decaying over ~250 ms, then a steady
  *                 commutation ripple                   (small DC motor)
  *
  * Those three behaviours are exactly what a NILM classifier keys off in
@@ -30,16 +30,16 @@
 #define BUS_NOMINAL_V    12.0f
 #define BUS_SAG_OHMS     0.18f   /* supply + wiring resistance */
 
-#define P_LIGHTS         5.0f
-#define P_HEATER         40.0f
-#define P_MOTOR          18.0f
+#define P_BASE         5.0f
+#define P_CHARGER         40.0f
+#define P_THERMAL          18.0f
 
-#define MOTOR_INRUSH_X   3.5f
-#define MOTOR_INRUSH_TAU 0.08f   /* seconds */
-#define MOTOR_RIPPLE_HZ  7.0f    /* commutation ripple */
+#define THERMAL_INRUSH_X   3.5f
+#define THERMAL_INRUSH_TAU 0.08f   /* seconds */
+#define THERMAL_RIPPLE_HZ  7.0f    /* commutation ripple */
 #define TWO_PI_F         6.28318531f
-#define HEATER_DROOP     0.06f   /* 6% power fade as it warms */
-#define HEATER_WARM_TAU  2.0f    /* seconds */
+#define CHARGER_DROOP     0.06f   /* 6% power fade as it warms */
+#define CHARGER_WARM_TAU  2.0f    /* seconds */
 
 #define SIM_CYCLE_MS     60000u
 
@@ -70,9 +70,9 @@ static float noise(float amplitude)
  * comfortably above the Phase 3 shed threshold, so the demand-response demo
  * has something to actually react to. */
 typedef struct { uint32_t on_ms, off_ms; } window_t;
-static const window_t W_LIGHTS = {  5000, 55000 };
-static const window_t W_MOTOR  = { 12000, 38000 };
-static const window_t W_HEATER = { 25000, 48000 };
+static const window_t W_BASE = {  5000, 55000 };
+static const window_t W_THERMAL  = { 12000, 38000 };
+static const window_t W_CHARGER = { 25000, 48000 };
 
 static bool in_window(uint32_t t, const window_t *w)
 { return t >= w->on_ms && t < w->off_ms; }
@@ -91,25 +91,25 @@ bool ina226_read(ina226_reading_t *out)
     float    p = 0.0f;
     s_mask     = LOAD_NONE;
 
-    if (in_window(t, &W_LIGHTS)) {
-        p      += P_LIGHTS + noise(0.05f);
-        s_mask |= LOAD_LIGHTS;
+    if (in_window(t, &W_BASE)) {
+        p      += P_BASE + noise(0.05f);
+        s_mask |= LOAD_BASE;
     }
 
-    if (in_window(t, &W_HEATER)) {
+    if (in_window(t, &W_CHARGER)) {
         /* Resistance rises with temperature, so power droops toward a floor. */
-        float warm = 1.0f - expf(-(float)(t - W_HEATER.on_ms) / 1000.0f
-                                 / HEATER_WARM_TAU);
-        p      += P_HEATER * (1.0f - HEATER_DROOP * warm) + noise(0.15f);
-        s_mask |= LOAD_HEATER;
+        float warm = 1.0f - expf(-(float)(t - W_CHARGER.on_ms) / 1000.0f
+                                 / CHARGER_WARM_TAU);
+        p      += P_CHARGER * (1.0f - CHARGER_DROOP * warm) + noise(0.15f);
+        s_mask |= LOAD_CHARGER;
     }
 
-    if (in_window(t, &W_MOTOR)) {
-        float dt     = (float)(t - W_MOTOR.on_ms) / 1000.0f;
-        float inrush = 1.0f + (MOTOR_INRUSH_X - 1.0f) * expf(-dt / MOTOR_INRUSH_TAU);
-        float ripple = 1.0f + 0.08f * sinf(dt * TWO_PI_F * MOTOR_RIPPLE_HZ);
-        p      += P_MOTOR * inrush * ripple + noise(0.20f);
-        s_mask |= LOAD_MOTOR;
+    if (in_window(t, &W_THERMAL)) {
+        float dt     = (float)(t - W_THERMAL.on_ms) / 1000.0f;
+        float inrush = 1.0f + (THERMAL_INRUSH_X - 1.0f) * expf(-dt / THERMAL_INRUSH_TAU);
+        float ripple = 1.0f + 0.08f * sinf(dt * TWO_PI_F * THERMAL_RIPPLE_HZ);
+        p      += P_THERMAL * inrush * ripple + noise(0.20f);
+        s_mask |= LOAD_THERMAL;
     }
 
     if (p < 0.0f) p = 0.0f;

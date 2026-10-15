@@ -91,9 +91,9 @@
       "7": "simulated"
     },
     "load_bits": {
-      "0": "lights",
-      "1": "heater",
-      "2": "motor"
+      "0": "base",
+      "1": "charger",
+      "2": "thermal"
     }
   },
 

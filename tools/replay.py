@@ -23,7 +23,7 @@ FIELDS = ["seq", "t_ms", "v", "i", "p", "wh", "flags", "truth"]
 FLAG_SENSOR_FAIL = 0x01
 FLAG_SIMULATED   = 0x80
 
-LOADS = [(0x01, "lights"), (0x02, "heater"), (0x04, "motor")]
+LOADS = [(0x01, "base"), (0x02, "charger"), (0x04, "thermal")]
 
 
 def truth_str(mask):

@@ -92,11 +92,11 @@ static void test_truth_string_rendering(void)
     telemetry_truth_str(LOAD_NONE, buf, sizeof(buf));
     TEST_ASSERT_EQUAL_STRING("off", buf);
 
-    telemetry_truth_str(LOAD_HEATER, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("heater", buf);
+    telemetry_truth_str(LOAD_CHARGER, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("charger", buf);
 
-    telemetry_truth_str(LOAD_LIGHTS | LOAD_MOTOR, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("lights+motor", buf);
+    telemetry_truth_str(LOAD_BASE | LOAD_THERMAL, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("base+thermal", buf);
 }
 
 int main(int, char **)

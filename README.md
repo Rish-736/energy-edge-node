@@ -13,10 +13,11 @@ smaller bill.
 Built entirely on a **safe low-voltage DC testbed (≤24 V)** — deliberately not
 mains. Same protocols, same control problem, no mains risk.
 
-> **Status: Phase 2 complete.** Sensing, telemetry, a Modbus-RTU slave/master
-> pair, an MQTT uplink with store-and-forward buffering, and a live web
-> dashboard — verified by 34 host unit tests. Phase 3, the deadline-aware shed
-> controller, is next.
+> **Status: Phase 3 complete.** Sensing, telemetry, a Modbus-RTU slave/master
+> pair, an MQTT uplink with store-and-forward buffering, a live dashboard, and
+> a deadline-aware demand controller — verified by 52 host unit tests.
+>
+> **Measured result: peak demand cut 58.2%, with zero deadline misses.**
 
 New here? Start with **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — it
 explains the whole system in plain language, no background assumed.
@@ -156,7 +157,8 @@ has exactly one definition, so the two ends of the bus cannot drift apart.
 | `esp32dev-sim` | ESP32 | Simulated loads — **no sensor needed** (default) |
 | `esp32dev` | ESP32 | Real INA226 over I2C |
 | `native-sim` | PC | Whole pipeline on the host, emits a capture |
-| `native` | PC | Unit tests — ring buffer, Modbus, store-and-forward |
+| `native` | PC | Unit tests — ring buffer, Modbus, store-and-forward, control |
+| `native-site` | PC | Closed-loop site model: baseline vs controlled |
 
 The gateway node has one environment, `esp32dev`. The only difference between
 the two ESP32 meter builds is `-D USE_INA226_SIM`.
@@ -164,7 +166,7 @@ the two ESP32 meter builds is `-D USE_INA226_SIM`.
 ### Run it
 
 ```bash
-# unit tests — no hardware (34 tests)
+# unit tests — no hardware (52 tests)
 pio test -e native -d meter_node
 
 # verify the register map's three copies still agree
@@ -246,6 +248,74 @@ T,0,0,11.999,0.0000,0.000,0.000000,128,0
 
 ---
 
+## How the controller decides (Phase 3)
+
+Full reasoning: [docs/DECISIONS.md](docs/DECISIONS.md) D83, D86–D90.
+
+### It acts on a forecast, not on the present value
+
+A demand charge is set by the average over a billing interval. Knowing the
+average *so far* is useless — by the time it crosses the limit the interval is
+nearly over and shedding cannot pull it back. So the controller projects where
+the interval will **land**:
+
+```
+projected = (energy_so_far + current_power * time_remaining) / window
+```
+
+That also means shedding late is worth less: with little of the window left,
+removing a load barely moves the average. `dw_excess_w()` accounts for this —
+the power it asks you to remove grows as the window runs out.
+
+### Slack decides which load, not a fixed priority list
+
+```
+energy_remaining = required - delivered
+time_needed      = energy_remaining / rated_power
+slack            = (deadline - now) - time_needed
+```
+
+Shed the load with the **most** slack; restore the one with the **least**.
+A load whose slack reaches zero becomes untouchable and is force-restored if
+it was already off — the deadline outranks the bill.
+
+This makes eligibility **dynamic**. Priorities never change, but which load may
+be shed right now changes second by second as slack drains. A static priority
+list would keep shedding the same load even as it ran out of time.
+
+### What it refuses to do
+
+| Refusal | Why |
+|---|---|
+| Shed a `FIXED` load | Lighting and controls are not negotiable |
+| Shed a load with no slack | The deadline is a hard constraint |
+| Shed before `min_on_ms` | Compressors need a minimum run or they are damaged |
+| Restore before `min_off_ms` | Restart inrush and winding heat |
+| Restore more than one load per stagger interval | Releasing several together creates a brand-new peak — the classic way a naive controller makes things worse |
+| Re-shed immediately after a forced restore | A drained buffer needs time to refill |
+
+That last one was a real bug, caught by a test: the controller force-restored a
+load and then re-shed it on the very same step, cycling the equipment and
+defeating `max_shed_ms` entirely.
+
+### Tested without a relay, a sensor, or a board
+
+`sched_step()` takes a power reading and a timestamp and returns a bitmask. It
+touches no hardware, so 18 tests drive it through complete scenarios — a full
+demand window, a deadline approaching, slack running out — in microseconds.
+
+| Test | Why it exists |
+|---|---|
+| `deadline_is_met_under_sustained_pressure` | The project's central claim, asserted |
+| `critical_load_is_never_shed` | A load with no slack is untouchable even when over target |
+| `slack_running_out_forces_a_restore` | The controller gives time back before the deadline bites |
+| `fixed_load_is_never_shed` | And it records a refusal rather than failing silently |
+| `max_shed_duration_forces_a_restore` | Buffer limits override the demand target |
+| `restores_are_staggered` | Prevents the controller causing the peak it exists to avoid |
+| `projection_sees_trouble_before_the_average_does` | The forecast, which is what makes it a demand controller |
+
+---
+
 ## MQTT, store-and-forward and the dashboard (Phase 2)
 
 The gateway publishes every poll to an MQTT broker; a web page charts it live.
@@ -303,7 +373,7 @@ accounts for every sample the ring ever saw.
 
 ### Tested without WiFi, a broker, or a board
 
-10 of the 34 tests cover the forwarder, because the logic is "a reader that
+10 of the 52 tests cover the forwarder, because the logic is "a reader that
 refuses to advance while the link is down" — drivable entirely by toggling a
 boolean:
 
@@ -339,7 +409,7 @@ buffer. So a master and a slave can talk **through memory**, and the whole
 request/response cycle is verified on a PC: CRC, framing, float word order, block
 reads, exceptions, broadcast suppression, and the retry path.
 
-18 of the 34 unit tests cover Modbus. The ones worth knowing about:
+18 of the 52 unit tests cover Modbus. The ones worth knowing about:
 
 | Test | Why it exists |
 |---|---|
@@ -400,19 +470,53 @@ Firmware footprint:
 
 ---
 
-## The results table Phase 3 will produce
+## Phase 3 results — the deadline-aware controller
+
+An identical EV-charging workload run twice: once with the controller
+disabled, once with it active. Same loads, same profile, same random seed. The
+only difference is whether the scheduler's output is allowed to drive the
+relays.
+
+```bash
+pio run -e native-site -d meter_node
+./meter_node/.pio/build/native-site/program
+```
 
 ```
-peak demand reduced        __%     the money
-cost saved                 __%
-deadline misses              0     the guarantee
-service violations           0
-actuation faults caught     __     Phase 5 — and nobody else reports this
+                        baseline   controlled
+peak demand (window)      62.20 W     25.97 W
+peak instantaneous       106.67 W    107.02 W
+mean power                 22.97 W     20.26 W
+charge delivered           1.506 Wh    1.506 Wh  (needed 1.50)
+deadline misses                 0           0
+sheds / restores                -      18 / 17  (1 forced)
+thermal runtime met        100.0%       68.4%
+
+peak demand reduced     58.2%
+deadline misses         0
 ```
 
-A demand-response result quoted without its service cost is incomplete. "Peak
-down 35% with zero deadline misses" is an engineering claim; "peak down 35%"
-alone is the claim that produced the 40% cold-water statistic.
+![before and after](docs/captures/site_control.png)
+
+**The bottom panel is the point.** Both runs deliver exactly the same charge.
+The controller did not save energy or shorten the job — it moved *when* the
+energy was drawn, and the car still departed full.
+
+### Three things in that table worth noticing
+
+**Instantaneous peak barely moved** (106.7 → 107.0 W), and that is correct. A
+demand charge is set by the 15-minute *average*, not the instant. A controller
+that chased instantaneous spikes would shed constantly for events that cost
+nothing. The number that fell is the one that is billed.
+
+**The energy figure dropped, and that is not a saving.** The charger delivered
+its full job in both runs; the difference is thermal runtime the controller
+withheld (100% → 68.4%). A real thermal load claws that back afterwards —
+*rebound* — which this model does not simulate. Reporting it as a saving would
+be dishonest, so the program prints the service cost explicitly.
+
+**`deadline misses = 0` is the claim the project rests on**, and it is asserted
+in the test suite as well as measured here.
 
 ---
 
@@ -421,7 +525,7 @@ alone is the claim that produced the 40% cold-water statistic.
 - [x] **Phase 0** — INA226 sampling, telemetry ring buffer, energy accumulation, replayable logs
 - [x] **Phase 1** — Modbus-RTU slave + master over RS-485, register map, device model, bus discovery
 - [x] **Phase 2** — MQTT uplink, live dashboard, **store-and-forward** buffering, SNTP clock, LWT
-- [ ] **Phase 3** — **deadline-aware shed controller**: rolling 15-minute demand window, per-load energy + deadline, staggered restore, hysteresis, alarms
+- [x] **Phase 3** — **deadline-aware shed controller**: rolling demand window with projection, per-load energy + deadline, slack-ordered shedding, staggered restore, equipment protection
 - [ ] **Phase 3.5** — Modbus-TCP gateway (transparent RTU↔TCP routing by unit ID)
 - [ ] **Phase 4** — full FreeRTOS task split, MQTT over TLS, security notes against **IEC 62443**
 - [ ] **Phase 5** — **NILM**: identify loads from one meter, *and* verify commanded sheds actually took effect

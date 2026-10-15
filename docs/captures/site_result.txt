@@ -1,0 +1,24 @@
+
+EV charging site -- 600 s, 60 s demand window, 35 W target
+job: 1.50 Wh by t=480 s (plugged in 60-540 s)
+
+                        baseline   controlled
+peak demand (window)      62.20 W     25.97 W
+peak instantaneous       106.67 W    107.02 W
+mean power                22.97 W     20.26 W
+energy                   3.8213 Wh   3.3701 Wh
+charge delivered          1.506 Wh    1.506 Wh  (needed 1.50)
+deadline misses               0           0
+sheds / restores              -       18 / 17  (1 forced)
+thermal runtime met      100.0%      68.4%
+
+peak demand reduced     58.2%
+deadline misses         0
+
+service cost: the charger met its deadline in full. The
+thermal load ran 68.4% of what it asked for, against 100.0%
+in the baseline. A real thermal load would recover that
+runtime afterwards (rebound), which this model does not
+simulate -- so the lower energy figure is NOT a saving.
+
+result: PASS

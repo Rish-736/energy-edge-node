@@ -3,8 +3,8 @@
 Everything built, the tech stack, the reasoning behind each decision, and the
 questions you will actually be asked.
 
-**Status:** Phases 0, 1 and 2 complete. 34 automated tests passing. ~2,600 lines
-of firmware. Runs against a simulator; the layers that touch physical hardware
+**Status:** Phases 0-3 complete. 52 automated tests passing. ~3,300 lines of
+firmware. **Measured result: peak demand cut 58.2% with zero deadline misses.** Runs against a simulator; the layers that touch physical hardware
 are written but not yet validated on silicon.
 
 ---
@@ -27,7 +27,7 @@ Your resume says:
 | **Auto-sheds non-critical loads to cut peak demand and cost** | **true** — still exactly what it does. The project now additionally *guarantees* each deferred load meets its deadline. |
 | Sensing + Modbus slave + auto-discovering gateway, 24 tests | true — **now 34 tests** |
 | In progress: MQTT dashboard | **the dashboard is now finished** |
-| In progress: load-shedding controller | still in progress — Phase 3 |
+| In progress: load-shedding controller | **now complete** — Phase 3 |
 | Safe DC testbed | true |
 
 **Nothing needs retracting.** If it comes up: *"since I sent that, the MQTT
@@ -273,6 +273,60 @@ asserts `published + dropped` accounts for every sample the ring ever saw.
 
 ---
 
+## 6b. Phase 3 — the deadline-aware controller
+
+**The measured result**, from an identical workload run with and without the
+controller:
+
+```
+                        baseline   controlled
+peak demand (window)      62.20 W     25.97 W     -> 58.2% lower
+charge delivered           1.506 Wh    1.506 Wh   -> identical
+deadline misses                 0           0
+thermal runtime met        100.0%       68.4%     -> the service cost
+```
+
+**It acts on a forecast, not the present value.** A demand charge is the
+average over a billing interval. By the time the average crosses the limit the
+interval is nearly over and shedding cannot pull it back. So it projects where
+the interval will land:
+`projected = (energy_so_far + power x time_remaining) / window`.
+That also means shedding late is worth less — with little of the window left,
+removing a load barely moves the average.
+
+**Slack picks the load, not a priority list.**
+`slack = (deadline - now) - (energy_remaining / rated_power)`.
+Shed the load with the most slack; restore the one with the least. A load whose
+slack hits zero becomes untouchable and is force-restored if already off. This
+makes eligibility *dynamic*: priorities never change, but which load may be
+shed right now changes second by second.
+
+**Three numbers in that table worth explaining:**
+
+- *Instantaneous peak barely moved* (106.7 -> 107.0 W) and that is correct —
+  demand charges are set by the 15-minute average, not the instant. Chasing
+  instantaneous spikes would shed constantly for events that cost nothing.
+- *Energy dropped, and it is not a saving.* The charger delivered its full job
+  both times; the difference is thermal runtime withheld. A real thermal load
+  recovers that later (rebound), which the model does not simulate. Saying
+  "58% lower peak AND 12% less energy" would be the dishonest version.
+- *`deadline misses = 0`* is asserted in the test suite, not just observed once.
+
+**Two real bugs the tests caught**, both worth telling:
+
+1. A forced restore was **immediately undone** by the shed logic on the same
+   step — the load cycled rapidly, defeating `max_shed_ms` entirely. On real
+   hardware that destroys a compressor. Fixed with a recovery period.
+2. Slack of *exactly* zero is a floating-point knife edge, so the scheduler
+   shed a critical load on one step and protected it on the next. Fixed with a
+   safety margin, which is also physically right — a job should finish early,
+   not exactly on time.
+
+Neither would have been visible from a demo. Both came from tests asserting on
+outcomes over time rather than on single calls.
+
+---
+
 ## 7. What makes this more than a copy — four pillars, graded honestly
 
 **1. Deadline-guaranteed deferral.** Deadlines are hard constraints; peak is the
@@ -304,11 +358,12 @@ is the real deployment barrier.
 
 ## 8. How it is proven
 
-**34 unit tests, all running on a PC** — no board, no flash cycle.
+**52 unit tests, all running on a PC** — no board, no flash cycle.
 
 | Suite | Count | Covers |
 |---|---|---|
 | ring buffer | 6 | ordering, late readers, overrun accounting, reader independence |
+| control | 18 | demand window + projection, slack, shed/restore rules, deadlines |
 | Modbus | 18 | CRC, float word order, exceptions, silence cases, writes, retries |
 | store-and-forward | 10 | outage buffering, ordered backfill, exact loss accounting |
 
@@ -431,15 +486,17 @@ each load's switching signature.
 | INA226 driver on real silicon | Written from datasheet, **never run** |
 | RS-485 transport on hardware | Written, **never run**; MAX485s not yet ordered |
 | MQTT/SNTP against a live broker | Compile-verified, logic unit-tested, **not run** |
-| Deadline controller | **Phase 3 — not built** |
+| Deadline controller | built and tested; **never run on real relays** |
 | Buffer state for deferrable loads | Will be **modelled, not measured** — no temperature/SoC sensor |
 | Accuracy vs reference multimeter | Not measured |
 | TLS / authentication | Phase 4 |
 | NILM | Phase 5 |
 
-**Never quote a peak-reduction percentage.** The controller doesn't exist yet.
-You have a measured *baseline* — **2.57× peak-to-mean** — and that is the honest
-number.
+**Quote the peak reduction carefully.** 58.2% is real and reproducible, but it
+is **from a simulated site, not hardware**. Say so: *"58% in a closed-loop
+simulation of the site; the controller has not driven real relays yet."*
+Quoting it without that qualifier is the one thing that could cost you the
+room.
 
 ---
 
