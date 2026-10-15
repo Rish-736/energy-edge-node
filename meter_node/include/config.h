@@ -11,9 +11,21 @@
 #define SAMPLE_PERIOD_MS      (1000 / SAMPLE_RATE_HZ)
 
 /* --- Telemetry ring ---------------------------------------------------- */
-/* Must be a power of two. 256 samples @ 10 Hz = ~25 s of history, so a reader
- * can stall for 25 s before it starts losing samples. */
-#define TELEMETRY_RING_SIZE   256
+/* TELEMETRY_RING_SIZE is deliberately NOT defined here -- it is set in
+ * platformio.ini instead.
+ *
+ * It sizes a struct in common/telemetry/ring_buffer.h, and some translation
+ * units (modbus_task.cpp) include that header BEFORE this file. Those would
+ * silently fall back to the header's own default and end up disagreeing with
+ * the rest of the build about sizeof(telemetry_ring_t) -- a one-definition-rule
+ * violation the compiler cannot warn about. A build flag reaches every
+ * translation unit regardless of include order.
+ *
+ * Currently 256 samples = ~25 s of history at 10 Hz, so a reader can stall
+ * that long before it starts losing samples. Must be a power of two.
+ *
+ * The sample struct and status flags live in common/telemetry/telemetry.h --
+ * they are a shared contract with the gateway, not local configuration. */
 
 /* --- INA226 ------------------------------------------------------------ */
 #define INA226_I2C_ADDR       0x40

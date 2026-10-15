@@ -25,6 +25,14 @@
  * the other. That is what the reader-cursor design buys.
  * -------------------------------------------------------------------------*/
 
+/* Guards the include-order hazard documented in config.h. This file includes
+ * ring_buffer.h (via modbus_task.h) BEFORE config.h, so if the ring size ever
+ * reaches this translation unit with a different value from the rest of the
+ * build, sizeof(telemetry_ring_t) would differ between object files and the
+ * linker would not complain. Fail at compile time instead. */
+static_assert(TELEMETRY_RING_SIZE == 256,
+              "TELEMETRY_RING_SIZE must come from platformio.ini, not a header default");
+
 static rs485_t           s_bus;
 static modbus_slave_t    s_slave;
 static meter_regs_t      s_regs;
