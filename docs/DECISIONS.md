@@ -1063,6 +1063,194 @@ cost beside it.
 
 ---
 
+## Part 9d — Phase 5: NILM and actuation verification
+
+### D93 — Track state by edges, and use absolute levels only as an anchor
+**The arithmetic that forced this.** With loads of 5, 18 and 40 W the eight
+possible states sit at 0, 5, 18, 23, 40, 45, 58 and 63 W. All distinct, so
+"measure the power and pick the nearest level" looks sufficient. It is not.
+The closest pair is 5 W apart, giving 2.5 W of margin, and the real signal
+wanders further than that:
+
+| source | size |
+|---|---|
+| charger droop as the element warms (6% of 40 W) | 2.4 W |
+| thermal commutation ripple (8% of 18 W) | 1.4 W |
+| sensor noise | ~0.4 W |
+
+At the 63 W state the measurement sits around 60.6 W, which is 2.4 W from
+"all three" and 2.6 W from "charger + thermal". The nearest-level answer is
+decided by 0.2 W — that is to say, by noise.
+
+**Alternatives:** nearest-level matching alone; a trained classifier.
+**Chosen:** track the believed state **differentially**, from steps in the
+power signal, and consult the absolute level only to anchor at startup or to
+correct a belief that has drifted.
+**Why:** a +18 W step means the thermal load started *whatever the charger's
+element is doing at the time*. Droop in one load cannot corrupt an edge
+belonging to another. This is the classic result from Hart's 1992 NILM work,
+and the arithmetic above is why it is not optional here.
+**Trade-off accepted:** a missed edge persists until the anchor notices, which
+is why the residual check exists (D96). A trained classifier was rejected as
+wildly disproportionate for eight states on a microcontroller.
+
+### D94 — Enumerate candidate states, not "which load changed"
+**Alternatives:** find the load whose rating is closest to the step size.
+**Chosen:** score all 2^n reachable states against the observed step and take
+the best.
+**Why:** two loads switching in the same interval stops being a special case
+and becomes just another candidate. It is also one scoring function for both
+jobs — the same code answers "which state explains this step?" and "which
+state explains this level?". Sixteen comparisons, and only when a level
+settles, not per sample.
+**Trade-off accepted:** exponential in load count. Fine to about 10 loads;
+beyond that a real installation wants per-circuit metering anyway (D104).
+
+### D95 — Penalise simultaneity rather than forbidding it
+**Chosen:** +2 W of scoring error per load beyond the first that a candidate
+claims changed.
+**Why:** two loads really can switch inside one interval, so forbidding it
+would be wrong. But without a penalty, a contrived three-load explanation
+will occasionally fit a noisy step better than the single load that actually
+switched. The penalty keeps the simple explanation ahead unless the evidence
+is genuinely strong.
+
+### D96 — Inrush as a fingerprint, tested in both directions
+**Chosen:** if a step overshoots its own settled height by ≥1.5×, a
+motor-like load must have *started* in that transition; a candidate that
+disagrees is penalised 6 W. The test is bidirectional — a motor starting
+*without* inrush is as suspicious as inrush nobody can account for.
+**Why:** this is what makes the method a method rather than a coincidence. It
+identifies a load by the **shape** of its turn-on, not its size, so it still
+works when two loads have similar wattage. `test_inrush_tells_two_identical_loads_apart`
+runs two 18 W loads that differ only in startup shape; deleting the penalty
+makes that test fail and nothing else, which is how we know it carries weight.
+**Why 1.5×:** the thermal load's 3.5× inrush decays with an 80 ms time
+constant, so even if the first sample lands a full 100 ms period late it still
+reads 1.7×. Clean steps read ~1.0×. 1.5 sits between with margin either side.
+**Trade-off accepted:** a load whose inrush is shorter than one sample period
+is invisible to this. At 10 Hz that means anything under ~100 ms.
+
+### D97 — Adaptive ratings, gated on margin rather than on error
+**Chosen:** nudge each load's working estimate toward what its own edges
+measure (α = 0.25), clamped to ±30% of the nameplate, and only when the
+winning candidate beat the runner-up by ≥4 W.
+**Why:** nameplates lie. The simulator's 40 W charger settles near 37.6 W
+warm, and the measured run converges the estimate to 38.5 W — which *widens*
+the 2.5 W margin from D93 instead of eating it. The gate has to be a margin
+and not an error bound, because a large absolute error is precisely the thing
+adaptation exists to fix; gating on error would block the correction wanted.
+**Trade-off accepted:** adaptation on a misattributed edge degrades the model.
+The clamp bounds the damage, the margin gate makes it unlikely, and
+`test_adaptation_cannot_run_away` holds the clamp in place.
+
+### D98 — Smooth the signal for levels, keep it raw for inrush
+**Chosen:** a 3-tap moving average feeds level and edge detection; the inrush
+peak is measured on the unfiltered samples.
+**Why:** at 10 Hz the thermal load's 7 Hz ripple aliases to about 3 Hz, which
+is almost exactly the null of a 3-tap average at this rate — it removes ~87%
+of the ripple and leaves a 5 W step essentially intact. That is what lets the
+stable band be 1.2 W and the edge threshold 2.5 W, below the smallest load.
+Smoothing the inrush, by contrast, would destroy the one feature D96 depends
+on. One signal, two paths, deliberately.
+**Trade-off accepted:** the filter adds about one sample of detection lag, and
+on the smallest load that lag is visible (D99).
+
+### D99 — Withhold confidence on a stale belief
+**Found by measuring, not by reasoning.** The first scored run reported 99.64%
+exact accuracy with exactly 10 false positives and 10 false negatives across
+exactly 10 simulator cycles. That regularity meant a systematic cause, and the
+CSV placed every one of them at `t=5000` and `t=55000` within each cycle — the
+precise instants the 5 W base load switches. One sample each.
+
+The cause: a 5 W step needs two samples to climb through a 3-tap average and
+cross the 2.5 W edge threshold. During that one sample the classifier is still
+in its steady state, still holding the old mask, and — the actual defect —
+still calling itself **confident**.
+
+**Chosen:** suppress confidence whenever the level has moved beyond the stable
+band, even if no edge has been declared yet.
+**Why:** `verify.h` gates on confidence, so a confidently wrong mask is exactly
+what would raise a phantom relay-fault alarm. Being one sample late is a
+non-event; being confidently wrong is the failure mode that matters.
+**Result:** 100.00% exact accuracy over the samples it commits to, with the
+committed fraction falling only from 93.4% to 93.1%. Twenty confidently-wrong
+samples became twenty honest "not sure" ones.
+
+### D100 — Reject an unexplainable step rather than guess
+**Chosen:** if no candidate state explains a step to within 4 W, count it,
+discard the belief, and re-anchor on the next stable level.
+**Why:** an unmodelled load or two overlapping events produce steps that fit
+nothing. Committing to the least-bad guess would corrupt the belief *and*
+poison the adaptive estimates through it. Admitting ignorance is recoverable;
+a corrupted model is not.
+
+### D101 — A grace window and a confirmation count before declaring a fault
+**Chosen:** 3000 ms of grace after any command change, then 3 consecutive
+*confident* disagreements.
+**Why:** a command takes time to appear. The relay settles in milliseconds but
+the classifier needs ~800 ms to commit, so judging immediately would report a
+fault every single time the controller did its job correctly. And while the
+classifier is unsure, no evidence is accumulated at all — an unconfident
+classifier is not evidence of a hardware fault.
+**Trade-off accepted:** the confirmation count is in *evaluations*, not
+milliseconds, so it scales with the control period. Documented at its
+definition in `gateway_node/include/config.h` rather than left as a trap.
+
+### D102 — Verify against the post-step commanded mask
+**Chosen:** `verify_step()` is called with the mask `sched_step()` just
+returned, not the one in force while the samples were taken.
+**Why:** it looks wrong and is right. If the command just changed, the
+verifier sees a change and restarts its grace window — so it declines to judge
+a relay on evidence gathered under the previous order, which is exactly the
+desired behaviour. If the command did not change, the two masks are identical
+and the question does not arise.
+
+### D103 — Measure detection latency from the command
+**Alternatives:** from the first disagreement.
+**Chosen:** from the command change.
+**Why:** the operationally useful number is "how long after ordering a shed do
+I learn it never happened", which is what an operator and an alarm policy both
+care about. Time-from-first-disagreement is an implementation detail.
+
+### D104 — One classifier on the metered feed, not one over the sum
+**Chosen:** the gateway runs NILM on device 0's stream.
+**Why:** the three loads in this model sit on one metered circuit. Summing
+several meters first would need their samples time-aligned across devices and
+would blur the very edges the method depends on. A site with several metered
+circuits wants one classifier *per circuit* — which is also exactly how
+PowerTag-per-breaker metering is laid out, so it is the natural extension
+rather than a change of approach.
+**Trade-off accepted:** stated as a limitation in the README rather than
+pretended away.
+
+### D105 — The simulator is a better rig than hardware for this phase
+**Why:** every sample carries a `truth` bitmask of which loads were really on.
+Real hardware cannot give you that without a meter per load — the very thing
+NILM exists to avoid needing. So for Phase 5 the simulator is not a stand-in
+for a missing bench; it is a **labelled dataset**, and hardware would be the
+inferior rig.
+**Corollary:** because the simulator runs a fixed schedule and ignores
+commands, commanding a load against it models a lying relay exactly. A welded
+contact is "command it off while the simulator keeps it running" — no
+simulator changes required.
+
+### D106 — The scorer exits non-zero, so it is a regression test
+**Chosen:** `native-nilm` gates on exact accuracy, committed fraction, mean
+recognition latency, every state change being recognised, zero false alarms on
+a healthy plant, both fault scenarios being detected, and recovery afterwards.
+**Why:** the same reasoning as `native-site` in D91. A demo that cannot fail
+proves nothing; thresholds are set just below measured performance so a real
+regression trips them and float jitter does not.
+
+### D107 — A compile-time check on the sample rate
+**Chosen:** `static_assert(POLL_PERIOD_MS == 100)` in the gateway's controller.
+**Why:** the classifier's stability and smoothing windows are counted in
+*samples*, so they only mean what the tuning intends if samples arrive at the
+rate they were tuned for. Changing the poll rate would silently retune the
+classifier. Same reasoning as the ring-size assertion from D81 — a check the
+compiler can make is far cheaper than discovering it on a bench.
+
 ## Part 10 — Deliberately deferred
 
 Things *not* done yet, and why that is the right call for now.
@@ -1109,7 +1297,7 @@ every tracked file decodes cleanly before committing.
 Two compiler warnings that were real: a deprecated increment on a `volatile`
 field, and `addr < 0` on an unsigned type.
 **Change:** `-Wall -Wextra` on every environment, and warnings are fixed rather
-than tolerated. All five builds are currently warning-free.
+than tolerated. All seven builds are currently warning-free.
 
 ### M5 — A second silent patch failure, found the same way
 While cross-checking FLOW.md against the source, the "Telemetry ring" comment in
@@ -1120,6 +1308,25 @@ documentation is what surfaced it, which is an argument for doing so.
 than trusting that it ran. Cross-checking docs against source is now part of
 finishing a phase, and it found both M5 and the D81 hazard in one pass.
 
+### M6 — A classifier that was confidently wrong, twice per cycle
+The first Phase 5 scoring run came back at 99.64% and looked like a success.
+The 20 errors were not noise, though: exactly 10 false positives and 10 false
+negatives across exactly 10 cycles, which is far too regular to be chance.
+Dumping the per-sample CSV put every one of them at the exact instant the
+smallest load switched — the classifier was one sample late, and was reporting
+that stale answer as **confident**.
+
+The accuracy number was never the problem. The problem was that `verify.h`
+gates on confidence, so those 20 samples were 20 chances to raise a phantom
+relay-fault alarm.
+**Change:** confidence is withheld whenever the level has moved but no edge has
+been declared yet (D99). Accuracy went to 100.00% and the committed fraction
+barely moved.
+**The lesson:** a good headline number is not evidence of a good system. The
+structure of the residual errors is where the information is — "99.64%" said
+nothing, "exactly 10 and 10 over exactly 10 cycles" said everything.
+
 **The common thread:** every one of these was found by *verifying* rather than
 assuming — running all the builds, checking what a patch actually did, reading
-the compiler output. That habit is worth more than any individual fix.
+the compiler output, looking at where the errors landed instead of only how
+many there were. That habit is worth more than any individual fix.

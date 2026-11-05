@@ -1,0 +1,51 @@
+=============================================================
+Phase 5 -- NILM disaggregation and actuation verification
+=============================================================
+
+PART 1 -- disaggregation against ground truth
+-------------------------------------------------------------
+  samples              6000  (600 s at 10 Hz)
+  committed to answer  5586  (93.1%)
+  exact mask correct   5586  (100.00% of those)
+
+  per load (over committed samples):
+    load           TP      FP      FN      TN precision    recall
+    base         4660       0       0     926   100.00%   100.00%
+    charger      2180       0       0    3406   100.00%   100.00%
+    thermal      2450       0       0    3136   100.00%   100.00%
+
+  state changes        60, recognised 60
+  recognition latency  mean 683 ms, worst 900 ms
+
+  classifier internals:
+    edges attributed   60
+    edges rejected     0  (explained nothing)
+    inrush detected    10
+    anchor corrections 0
+    adapted ratings    base 4.92 W (rated 5.0), charger 38.48 W (rated 40.0), thermal 18.01 W (rated 18.0)
+
+PART 2 -- actuation verification
+-------------------------------------------------------------
+  The simulator runs a fixed schedule and ignores commands, so
+  commanding a load against it models a relay that lies.
+
+  healthy  (commands obeyed)
+    faults 0, verdicts given on 1088 steps  -> no false alarms
+  welded   (charger ordered off at t=28 s, keeps drawing)
+    detected as STUCK-ON after 3400 ms
+  open     (charger ordered on at t=16 s, draws nothing)
+    detected as STUCK-OFF after 3400 ms, recovered to ok once it
+    really came on at t=25 s
+
+VERDICT
+-------------------------------------------------------------
+  pass  exact accuracy 100.00% (gate 95.00%)
+  pass  committed on 93.1% of samples (gate 80.0%)
+  pass  mean recognition latency 683 ms (gate 2500 ms)
+  pass  all 60 state changes recognised
+  pass  healthy plant raised no false alarms
+  pass  welded contact detected in 3400 ms
+  pass  failed-open contact detected in 3400 ms
+  pass  verifier recovered once the fault cleared
+
+RESULT: PASS

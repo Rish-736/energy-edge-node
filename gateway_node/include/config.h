@@ -134,6 +134,25 @@
 #define LOAD_CHARGER_W     40.0f
 #define LOAD_THERMAL_W     18.0f
 
+/* --- NILM + actuation verification (Phase 5) ---------------------------- */
+/* How long after a relay command the verifier waits before judging it. Must
+ * exceed the classifier's settle time -- about 800 ms at 10 Hz -- plus the
+ * slowest transient it is watching, or every correctly executed shed gets
+ * reported as a relay fault. */
+#define VERIFY_GRACE_MS    3000u
+
+/* Consecutive CONFIDENT disagreements before a fault is declared. Counted in
+ * evaluations rather than milliseconds, so it scales with CONTROL_PERIOD_MS:
+ * 3 evaluations at 500 ms is 1.5 s of corroboration on top of the grace
+ * window. One odd reading is noise; three in a row is a relay. */
+#define VERIFY_CONFIRM     3
+
+/* The thermal load is the only motor-like one: it draws ~3.5x its running
+ * power for ~250 ms at switch-on. That overshoot is how the classifier names
+ * it by SHAPE rather than by size, which is what lets the method survive two
+ * loads of similar wattage. */
+#define NILM_THERMAL_INRUSH 1
+
 /* Equipment protection. Violating these damages hardware, so they override
  * the demand target. */
 #define CHARGER_MIN_ON_MS  5000u

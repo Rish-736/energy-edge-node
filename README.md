@@ -166,7 +166,7 @@ the two ESP32 meter builds is `-D USE_INA226_SIM`.
 ### Run it
 
 ```bash
-# unit tests — no hardware (52 tests)
+# unit tests — no hardware (82 tests)
 pio test -e native -d meter_node
 
 # verify the register map's three copies still agree
@@ -520,6 +520,95 @@ in the test suite as well as measured here.
 
 ---
 
+## Phase 5 results — one meter, three loads, and a relay that lies
+
+Two claims, both scored rather than asserted. Reproduce with:
+
+```bash
+pio run -e native-nilm -d meter_node
+./meter_node/.pio/build/native-nilm/program
+```
+
+### 1. Disaggregation — which loads are on, from one aggregate reading
+
+600 s, 6000 samples, scored against the simulator's per-sample ground-truth
+labels (`docs/captures/nilm_result.txt`):
+
+```
+committed to answer   5586  (93.1%)
+exact mask correct    5586  (100.00% of those)
+
+load        TP     FP     FN     TN   precision   recall
+base      4660      0      0    926     100.00%  100.00%
+charger   2180      0      0   3406     100.00%  100.00%
+thermal   2450      0      0   3136     100.00%  100.00%
+
+state changes       60, all 60 recognised
+recognition latency mean 683 ms, worst 900 ms
+adapted ratings     charger 38.48 W from a 40.0 W nameplate
+```
+
+![NILM disaggregation](docs/captures/nilm_score.png)
+
+The top panel is the **only input**. The middle panel is three clean on/off
+traces recovered from it, drawn over the truth bands. Orange strips are the
+moments it declined to answer — **being late beats being confidently wrong**,
+and that distinction was worth 20 samples per 10 cycles (see D99).
+
+The bottom panel shows it learning: the residual dips to −2.3 W on the first
+charger cycle and only −1.8 W on the second, as the adaptive estimate
+converges on the element's real warm wattage.
+
+**The number that is not 100%** is the 93.1% it commits to. It stays silent
+through every transition rather than guessing, and the accuracy figure is only
+claimed over what it committed to — reported together so neither can be gamed.
+
+### 2. Actuation verification — did the relay actually obey?
+
+The scheduler credits delivered energy from the state it *commanded* and the
+nameplate rating. It has no per-load meter, so a welded contact is invisible
+to it: the shed arithmetic becomes fiction and the demand target is
+"defended" by a load that never stopped drawing. A relay's own state cannot
+detect this — a welded contact still reads *commanded off*.
+
+So the command is checked against an independent measurement:
+
+| commanded | measured | verdict |
+|---|---|---|
+| off | off | `ACT_OK` |
+| **off** | **drawing** | **`ACT_STUCK_ON`** — welded contact |
+| **on** | **nothing** | **`ACT_STUCK_OFF`** — failed open, or unplugged |
+
+Because the simulator runs a fixed schedule and ignores commands, commanding a
+load against it models a lying relay exactly — no simulator changes needed:
+
+```
+healthy  (commands obeyed)           0 faults over 1088 judged steps
+welded   (ordered off, keeps drawing) STUCK-ON  detected after 3400 ms
+open     (ordered on, draws nothing)  STUCK-OFF detected after 3400 ms,
+                                      recovered to ok when it really came on
+```
+
+**The one-sentence version:** *the controller doesn't trust its own relays; it
+verifies them against the meter.*
+
+### What this does not do
+
+- **One classifier per metered circuit, not one over the sum.** The three
+  loads here share one circuit. Summing several meters first would need their
+  samples time-aligned and would blur the edges the method depends on — a
+  multi-circuit site wants one classifier per circuit, which is also how
+  PowerTag-per-breaker metering is laid out.
+- **Partial failures are out of scope.** A load that switches correctly but
+  draws the wrong amount does not change the on/off mask. It shows up as a
+  persistent non-zero residual, not as a fault verdict.
+- **Inrush shorter than one sample period is invisible.** At 10 Hz that means
+  under ~100 ms.
+- **Scored in simulation.** Like every number in this README except the
+  Modbus timings, this has not yet run on hardware.
+
+---
+
 ## Roadmap
 
 - [x] **Phase 0** — INA226 sampling, telemetry ring buffer, energy accumulation, replayable logs
@@ -528,7 +617,7 @@ in the test suite as well as measured here.
 - [x] **Phase 3** — **deadline-aware shed controller**: rolling demand window with projection, per-load energy + deadline, slack-ordered shedding, staggered restore, equipment protection
 - [ ] **Phase 3.5** — Modbus-TCP gateway (transparent RTU↔TCP routing by unit ID)
 - [ ] **Phase 4** — full FreeRTOS task split, MQTT over TLS, security notes against **IEC 62443**
-- [ ] **Phase 5** — **NILM**: identify loads from one meter, *and* verify commanded sheds actually took effect
+- [x] **Phase 5** — **NILM**: identify loads from one meter, *and* verify commanded sheds actually took effect
 
 ---
 

@@ -369,9 +369,18 @@ filling the ring whether or not anything can be published.
 ```
 task_control()
  ├─ for each device: ring_reader_attach(ring, &s_reader[k], "control")
+ ├─ ring_reader_attach(device0, &s_nilm_reader, "nilm")   <- its OWN cursor
  ├─ apply_mask(initial)                     drive the relay GPIOs
  │
  └─ forever:
+     ├─ feed_classifier(...)                      common/nilm/nilm.cpp
+     │     drain device 0's ring through its own cursor and push EVERY
+     │     sample into nilm_update(). The controller below wants only the
+     │     newest value; the classifier needs each one in order, because an
+     │     edge falling between two control steps is an edge it would
+     │     otherwise never see. Two readers, one ring, no coupling --
+     │     which is what per-reader cursors are for.
+     │
      ├─ w = read_site_power(...)
      │     for each device: drain its ring to the NEWEST sample and sum
      │     the power. Present values, not history -- so the backlog is
@@ -390,13 +399,35 @@ task_control()
      │   └─ return sched_mask()
      │
      ├─ if (mask changed) apply_mask(mask) + log the transition
-     ├─ every 10 s: log avg / peak / sheds / restores / misses / slack
+     │
+     ├─ verify_step(&s_verify, mask,              common/nilm/verify.cpp
+     │              nilm_mask(), nilm_confident(), now)
+     │     Hold the COMMAND up against the MEASUREMENT.
+     │     ├─ command changed?        -> restart grace, verdict PENDING
+     │     ├─ inside the grace window -> PENDING  (a shed takes ~800 ms
+     │     │                              to become visible)
+     │     ├─ classifier unsure?      -> no evidence gathered at all
+     │     ├─ they agree              -> ACT_OK
+     │     └─ they disagree, 3x running:
+     │           commanded off, still drawing -> ACT_STUCK_ON   (welded)
+     │           commanded on, drawing nothing-> ACT_STUCK_OFF  (open)
+     │
+     ├─ if (fault mask changed) log it loudly -- the shed arithmetic is
+     │     fiction while a relay disagrees with its command
+     ├─ every 10 s: log avg / peak / sheds / restores / misses / slack,
+     │     then commanded vs measured / residual / edges / faults
      └─ vTaskDelayUntil(500 ms)
 ```
 
 **Note what it does not do:** it never touches MQTT. It reads the ring buffer,
 so it keeps shedding and restoring with the network unplugged. That is the
 edge-autonomy claim, implemented rather than asserted.
+
+**Two clocks, deliberately.** The classifier is fed each sample's own `t_ms`,
+because its windows are counted in *samples* and it uses time only for
+diagnostics. The verifier runs on `millis()`, because its grace window is real
+elapsed time. A `static_assert` on `POLL_PERIOD_MS` keeps the sample rate at
+the 10 Hz the classifier's windows were tuned for.
 
 ### task_uplink — every 20 ms, priority 3, core 0
 
@@ -462,10 +493,16 @@ publish_batch(d)
    PubSubClient / WiFi    ──  ONLY task_uplink               → no mutex needed
    relay GPIOs            ──  ONLY task_control              → no mutex needed
    d->ring                ──  written by task_poll,
-                              read by task_uplink (forwarder) AND
-                              task_control, each with its own cursor
+                              read by task_uplink (forwarder), task_control,
+                              AND the classifier, each with its own cursor
                               → protected by portMUX inside ring_buffer.cpp
+   s_nilm / s_verify      ──  ONLY task_control                → no mutex needed
 ```
+
+Three independent readers now share device 0's ring, each at a different
+position in it: the publisher keeps every sample, the controller takes only
+the newest, the classifier takes every sample but lags the publisher. None of
+them knows the others exist.
 
 Single ownership of the bus and of the MQTT client is deliberate: it removes the
 need for locking around either, which is cheaper and safer than adding mutexes.
@@ -573,6 +610,9 @@ Each test directory is a separate program with its own `main()`:
 | `test/test_modbus/` | 18 | same |
 | `test/test_forwarder/` | 10 | same |
 | `test/test_control/` | 18 | same |
+| `test/test_nilm/` | 30 | same |
+
+**82 tests in ~15 seconds, none of which need a board.**
 
 Unity calls `setUp()` before each test and `tearDown()` after. The `native`
 environment sets `build_src_filter = -<*>` — **nothing** from `src/` is
@@ -586,7 +626,14 @@ test_ring       → ring_init, ring_push, ring_reader_attach, ring_read
 test_modbus     → modbus_master_build_* → modbus_slave_handle → modbus_master_parse_*
 test_forwarder  → forwarder_set_link(true/false) + ring_push, then forwarder_take
 test_control    → dw_update/dw_excess_w, then sched_step over whole scenarios
+test_nilm       → nilm_update over switching sequences; verify_step over
+                  command/measurement pairs including a welded contact
 ```
+
+`test_nilm` includes a **mutation check worth knowing about**: deleting the
+inrush penalty makes `test_inrush_tells_two_identical_loads_apart` fail and
+nothing else. That is how we know the fingerprint logic is load-bearing rather
+than decorative — a test that cannot fail is not evidence.
 
 `test_forwarder` is worth noting: the entire store-and-forward feature is
 exercised by **toggling a boolean** and counting what comes out. No WiFi, no
@@ -607,6 +654,10 @@ broker, no board.
 | `modbus/modbus_rtu.h/.cpp` | `modbus_crc16`, `modbus_slave_init/handle`, `modbus_master_build_*`/`parse_*`, `mb_put_f32`/`mb_get_f32`, `mb_put_u32`/`mb_get_u32`, `mb_result_str` | both firmwares, tests |
 | `modbus/meter_regs.h/.cpp` | the register map; `meter_regs_init/read/write`, `meter_regs_decode_poll` | meter (serves), gateway (decodes), tests |
 | `modbus/rs485.h/.cpp` | `rs485_begin`, `rs485_poll_frame`, `rs485_recv_frame`, `rs485_send`, `rs485_flush_input` | both firmwares. **Arduino-only** (`#ifdef ARDUINO`) |
+| `control/demand_window.h/.cpp` | `dw_init`, `dw_update`, `dw_average_w`, `dw_projected_w`, `dw_excess_w` | scheduler, site model, tests |
+| `control/scheduler.h/.cpp` | `sched_init`, `sched_add_load`, `sched_set_job`, `sched_slack_s`, `sched_is_critical`, `sched_step`, `sched_mask` | gateway controller, site model, tests |
+| `nilm/nilm.h/.cpp` | `nilm_init`, `nilm_add_load`, `nilm_update`, `nilm_mask`, `nilm_confident`, `nilm_expected_w`, `nilm_resync` | gateway controller, scorer, tests |
+| `nilm/verify.h/.cpp` | `verify_init`, `verify_add_load`, `verify_step`, `verify_state`, `verify_fault_mask` | gateway controller, scorer, tests |
 
 ### Meter — `meter_node/`
 
@@ -618,6 +669,8 @@ broker, no board.
 | `src/ina226_real.cpp` | the I2C driver; `reg_read()`, `reg_write()` |
 | `src/energy.cpp` | `energy_reset()`, `energy_update()`, `energy_wh()` |
 | `src/sim_main.cpp` | host `main()` — excluded from ESP32 builds |
+| `src/site_main.cpp` | host `main()` for the closed-loop site model (`native-site`) |
+| `src/nilm_main.cpp` | host `main()` for the Phase 5 scorer (`native-nilm`) |
 | `include/config.h` | rates, pins, I2C address, Modbus unit/baud, ring size |
 
 Both `ina226_*.cpp` define the *same* four functions; `-D USE_INA226_SIM`
